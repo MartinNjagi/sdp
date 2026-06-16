@@ -68,14 +68,18 @@ type AppConfig struct {
 	WalletBalanceURL    string
 
 	// ----- Safaricom SDP -------------------------------------------------------
-	SDPCpID           string // SDP_CPID
-	SDPSourceAddress  string // SDP_SOURCE_ADDRESS
-	SDPBulkSMSURL     string // SDP_BULK_SMS_URL
-	SDPBulkDLRURL     string // SDP_BULK_SMS_DLR_URL
-	SDPBulkChannel    string // SDP_BULK_SMS_CHANNEL:  default "sms"
-	SDPSendSMSURL     string // SDP_SENDSMS_URL
-	SDPSendSMSChannel string // SDP_SENDSMS_CHANNEL:   default "sms"
-	SDPTokenRedisKey  string // SDP_TOKEN_REDIS_KEY:   default "sdp:token"
+	SDPCpID            string // SDP_CPID
+	SDPSourceAddress   string // SDP_SOURCE_ADDRESS
+	SDPBulkSMSURL      string // SDP_BULK_SMS_URL
+	SDPBulkDLRURL      string // SDP_BULK_SMS_DLR_URL
+	SDPBulkChannel     string // SDP_BULK_SMS_CHANNEL:  default "sms"
+	SDPSendSMSURL      string // SDP_SENDSMS_URL
+	SDPSendSMSChannel  string // SDP_SENDSMS_CHANNEL:   default "sms"
+	SDPTokenRedisKey   string // SDP_TOKEN_REDIS_KEY:   default "sdp:token"
+	SDPRefreshTokenURL string
+	SDPNewUsername     string
+	SDPNewPassword     string
+	SDPNewTokenURL     string
 
 	// ----- SSE / Redis Pub/Sub -------------------------------------------------------
 	// The SDP publishes DLR events and campaign progress to this channel.

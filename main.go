@@ -67,6 +67,10 @@ func main() {
 	var app routers.App
 	app.Initialize(ctx, cfg, db, rdc, amqp, s3Client)
 
+	//Init token Refresh
+	var conn connections.SDP
+	conn.InitSDPToken(ctx, rdc, cfg)
+
 	// ----- 5. HTTP Server ---------------------------------------------------
 	r := app.SetupRouter()
 

@@ -71,14 +71,18 @@ func InitConfig() *data.AppConfig {
 
 		SSEChannel: getEnv("SSE_REDIS_CHANNEL", "ws:messages"),
 
-		SDPCpID:           getEnv("SDP_CPID", ""),
-		SDPSourceAddress:  getEnv("SDP_SOURCE_ADDRESS", ""),
-		SDPBulkSMSURL:     getEnv("SDP_BULK_SMS_URL", ""),
-		SDPBulkDLRURL:     getEnv("SDP_BULK_SMS_DLR_URL", ""),
-		SDPBulkChannel:    getEnv("SDP_BULK_SMS_CHANNEL", "sms"),
-		SDPSendSMSURL:     getEnv("SDP_SENDSMS_URL", ""),
-		SDPSendSMSChannel: getEnv("SDP_SENDSMS_CHANNEL", "sms"),
-		SDPTokenRedisKey:  getEnv("SDP_TOKEN_REDIS_KEY", "sdp:token"),
+		SDPCpID:            getEnv("SDP_CPID", ""),
+		SDPSourceAddress:   getEnv("SDP_SOURCE_ADDRESS", ""),
+		SDPBulkSMSURL:      getEnv("SDP_BULK_SMS_URL", ""),
+		SDPBulkDLRURL:      getEnv("SDP_BULK_SMS_DLR_URL", ""),
+		SDPBulkChannel:     getEnv("SDP_BULK_SMS_CHANNEL", "sms"),
+		SDPSendSMSURL:      getEnv("SDP_SENDSMS_URL", ""),
+		SDPSendSMSChannel:  getEnv("SDP_SENDSMS_CHANNEL", "sms"),
+		SDPTokenRedisKey:   getEnv("SDP_TOKEN_REDIS_KEY", "sdp:token"),
+		SDPRefreshTokenURL: getEnv("SDP_REFRESH_TOKEN_URL", ""),
+		SDPNewTokenURL:     getEnv("SDP_NEW_TOKEN_URL", ""),
+		SDPNewUsername:     getEnv("SDP_USERNAME", ""),
+		SDPNewPassword:     getEnv("SDP_PASSWORD", ""),
 	}
 
 	// Parse MNO_ROUTES JSON.
