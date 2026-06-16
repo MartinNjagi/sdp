@@ -2,11 +2,11 @@
     "swagger": "2.0",
     "info": {
         "description": "This is a REST server for a Gin-based application.",
-        "title": "sdp-service API Backend",
+        "title": "sms-service API Backend",
         "termsOfService": "https://dreamhubtech.com/terms/",
         "contact": {
             "name": "API Support",
-            "url": "https://www.dreamhubtech.com/supportsw",
+            "url": "https://www.dreamhubtech.com/support",
             "email": "support@dreamhubtech.com"
         },
         "license": {

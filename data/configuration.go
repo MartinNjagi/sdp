@@ -19,12 +19,18 @@ type AppConfig struct {
 
 	// ----- Redis ------------------------------------------------------------
 	RedisAddr     string // REDIS_ADDR: default "localhost:6379"
+	RedisHost     string
+	RedisPort     string
 	RedisPassword string // REDIS_PASSWORD
 	RedisDB       int    // REDIS_DB: default 0
 
 	// ----- RabbitMQ ---------------------------------------------------------
-	AMQPURL string // AMQP_URL: e.g. "amqp://guest:guest@localhost:5672/"
-
+	AMQPURL     string // AMQP_URL: e.g. "amqp://guest:guest@localhost:5672/"
+	RMQHost     string
+	RMQPort     int
+	RMQUser     string
+	RMQPassword string
+	RMQVHost    string
 	// ----- Worker Pool ------------------------------------------------------
 	// WorkerPoolSize controls how many goroutines consume from the outbound queue.
 	// Rule of thumb: start at 5, raise until CPU or MNO TPS ceiling is hit.

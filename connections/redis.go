@@ -3,6 +3,7 @@ package connections
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
@@ -16,8 +17,8 @@ var (
 )
 
 func InitRedis(Config *data.AppConfig) *redis.Client {
-	addr := Config.RedisAddr
 
+	addr := fmt.Sprintf("%s:%s", Config.RedisHost, Config.RedisPort)
 	opts := &redis.Options{
 		Addr:     addr,
 		Password: Config.RedisPassword,

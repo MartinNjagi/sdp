@@ -1,6 +1,7 @@
 package connections
 
 import (
+	"fmt"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/sirupsen/logrus"
 	"sdp/data"
@@ -8,7 +9,17 @@ import (
 
 func InitRMQ(cfg *data.AppConfig) *amqp.Connection {
 
-	uri := cfg.AMQPURL
+	host := cfg.RMQHost
+	user := cfg.RMQUser
+	pass := cfg.RMQPassword
+	port := cfg.RMQPort
+	vhost := cfg.RMQVHost
+
+	uri := fmt.Sprintf("amqps://%s:%s@%s:%d/%s", user, pass, host, port, vhost)
+
+	if cfg.Env == "local" {
+		uri = fmt.Sprintf("amqp://%s:%s@%s:%d", user, pass, host, port)
+	}
 
 	conn, err := amqp.Dial(uri)
 

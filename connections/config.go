@@ -35,10 +35,17 @@ func InitConfig() *data.AppConfig {
 		DBSSLMode:  getEnv("DB_SSL_MODE", "disable"),
 
 		RedisAddr:     getEnv("REDIS_ADDR", "localhost:6379"),
+		RedisHost:     getEnv("REDIS_HOST", "localhost"),
+		RedisPort:     getEnv("REDIS_PORT", "6379"),
 		RedisPassword: getEnv("REDIS_PASSWORD", ""),
 		RedisDB:       getEnvInt("REDIS_DB", 0),
 
-		AMQPURL: getEnv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
+		AMQPURL:     getEnv("AMQP_URL", ""),
+		RMQHost:     getEnv("RABBITMQ_HOST", ""),
+		RMQUser:     getEnv("RABBITMQ_USER", ""),
+		RMQPassword: getEnv("RABBITMQ_PASS", ""),
+		RMQVHost:    getEnv("RABBITMQ_VHOST", ""),
+		RMQPort:     getEnvInt("RABBITMQ_PORT", 0),
 
 		WorkerPoolVIP:      getEnvInt("WORKER_POOL_VIP", 10),
 		WorkerPoolBulk:     getEnvInt("WORKER_POOL_BULK", 2),

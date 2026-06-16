@@ -3,13 +3,13 @@ info:
   contact:
     email: support@dreamhubtech.com
     name: API Support
-    url: https://www.dreamhubtech.com/supportsw
+    url: https://www.dreamhubtech.com/support
   description: This is a REST server for a Gin-based application.
   license:
     name: Apache 2.0
     url: https://www.apache.org/licenses/LICENSE-2.0.html
   termsOfService: https://dreamhubtech.com/terms/
-  title: sdp-service API Backend
+  title: sms-service API Backend
   version: "1.0"
 paths: {}
 securityDefinitions:

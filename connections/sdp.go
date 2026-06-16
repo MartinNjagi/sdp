@@ -27,7 +27,8 @@ func (s *SDP) InitSDPToken(ctx context.Context, rdc *redis.Client, cfg *data.App
 	s.rdc = rdc
 	s.cfg = cfg
 
-	go s.rdc.FlushDB(ctx)
+	// TODO uncomment after provision
+	//go s.StartTokenRefresher(ctx)
 }
 
 // StartTokenRefresher launches the background goroutine that keeps the Safaricom

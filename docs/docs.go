@@ -12,7 +12,7 @@ const docTemplate = `{
         "termsOfService": "https://dreamhubtech.com/terms/",
         "contact": {
             "name": "API Support",
-            "url": "https://www.dreamhubtech.com/supportsw",
+            "url": "https://www.dreamhubtech.com/support",
             "email": "support@dreamhubtech.com"
         },
         "license": {
@@ -39,7 +39,7 @@ var SwaggerInfo = &swag.Spec{
 	Host:             "",
 	BasePath:         "/api/v1",
 	Schemes:          []string{},
-	Title:            "sdp-service API Backend",
+	Title:            "sms-service API Backend",
 	Description:      "This is a REST server for a Gin-based application.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,

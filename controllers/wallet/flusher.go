@@ -39,7 +39,7 @@ func NewFlusher(wallet *HotWallet, rdc *redis.Client, walletSvcURL string, inter
 		wallet:        wallet,
 		rdc:           rdc,
 		walletSvcURL:  walletSvcURL,
-		flushInterval: time.Duration(interval),
+		flushInterval: time.Duration(interval) * time.Second,
 		httpClient:    &http.Client{Timeout: 10 * time.Second},
 	}
 }
