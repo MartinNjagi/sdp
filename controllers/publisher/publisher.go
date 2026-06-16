@@ -1,4 +1,4 @@
-package queue
+package publisher
 
 import (
 	"context"
@@ -16,17 +16,15 @@ import (
 const (
 	OutboundExchange = "sms.outbound"
 
-	// Three queues — one per message class.
-
-	VIPQueue      = "sms.q.transactional.vip"      // OTPs, auth codes — max priority
-	StandardQueue = "sms.q.transactional.standard" // Receipts, notifications
-	BulkQueue     = "sms.q.bulk.campaigns"         // Campaign fan-out envelopes
+	QueueVIP      = "sms.q.transactional.vip"      // OTPs, auth codes — max priority
+	QueueStandard = "sms.q.transactional.standard" // Receipts, notifications
+	QueueBulk     = "sms.q.bulk.campaigns"         // Campaign fan-out envelopes
 
 	RoutingKeyVIP      = "transactional.vip"
 	RoutingKeyStandard = "transactional.standard"
 	RoutingKeyBulk     = "bulk.campaigns"
 
-	// Dead-letter exchange — receives messages that exhaust all retries.
+	// DeadLetterExchange — receives messages that exhaust all retries.
 	DeadLetterExchange = "sms.dead"
 	DeadLetterQueue    = "sms.dead.q"
 
@@ -40,9 +38,9 @@ type Publisher struct {
 	ch *amqplib.Channel
 }
 
-// NewPublisher opens a channel, declares all exchanges and queues, and returns a
+// New opens a channel, declares all exchanges and queues, and returns a
 // ready Publisher.
-func NewPublisher(conn *amqplib.Connection) (*Publisher, error) {
+func New(conn *amqplib.Connection) (*Publisher, error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		return nil, fmt.Errorf("publisher: open channel: %w", err)
@@ -170,9 +168,9 @@ func declareTopology(ch *amqplib.Channel) error {
 		name string
 		key  string
 	}{
-		{VIPQueue, RoutingKeyVIP},
-		{StandardQueue, RoutingKeyStandard},
-		{BulkQueue, RoutingKeyBulk},
+		{QueueVIP, RoutingKeyVIP},
+		{QueueStandard, RoutingKeyStandard},
+		{QueueBulk, RoutingKeyBulk},
 	}
 
 	for _, q := range queues {

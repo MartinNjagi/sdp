@@ -1,16 +1,18 @@
-package router
+package routers
 
 import (
 	"context"
-	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"sdp/controllers"
+	"sdp/controllers/dlr"
+	"sdp/data"
+
+	amqplib "github.com/rabbitmq/amqp091-go"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
-	"gorm.io/gorm"
-	"sdp/controllers"
-	"sdp/data"
-	"sdp/queue"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // App is the application container. Every service and controller is a field
@@ -22,8 +24,10 @@ type App struct {
 	rdc *redis.Client
 
 	// SDP is the Service Delivery Platform gateway. It owns the worker pool,
-	// publisher, and DLR reconciler. Exposed so main.go can call Start/Stop.
-	SDP *controllers.Controller
+	// publisher, and DLR reconcile. Exposed so main.go can call Start/Stop.
+	SDP *controllers.SDP
+
+	s3Client *s3.Client
 }
 
 // Initialize constructs every dependency in order and wires them together.
@@ -33,20 +37,22 @@ func (a *App) Initialize(
 	cfg *data.AppConfig,
 	db *gorm.DB,
 	rdc *redis.Client,
-	amqp *amqp.Connection,
+	amqp *amqplib.Connection,
+	s3Client *s3.Client,
 ) {
 	a.cfg = cfg
 	a.db = db
 	a.rdc = rdc
 
 	// --- SDP ----------------------------------------------------------------
-	// Pass only the primitives the SDP needs. It builds its own sub-components
+	// Pass only the primitives the SDP needs. It builds its own subcomponents
 	// internally — the App doesn't need to know about workers or dispatchers.
-	sdp, err := controllers.NewController(ctx, cfg, db, amqp)
+	sdp, err := controllers.New(ctx, cfg, db, amqp)
 	if err != nil {
 		logrus.Fatalf("Failed to initialise SDP: %v", err)
 	}
 	a.SDP = sdp
+	a.s3Client = s3Client
 
 	// Note: SDP.Start() is called from main.go AFTER the HTTP server goroutine
 	// is running, so the DLR webhook routes are live before workers begin
@@ -78,7 +84,7 @@ func (a *App) SetupRouter() *gin.Engine {
 	// These endpoints receive inbound calls from MNOs — no auth middleware,
 	// but production deployments should whitelist MNO IP ranges at the
 	// load-balancer / firewall level.
-	dlrHandler := queue.NewHandler(a.SDP.Reconciler())
+	dlrHandler := dlr.NewHandler(a.SDP.Reconciler())
 
 	webhooks := r.Group("/webhooks")
 	{

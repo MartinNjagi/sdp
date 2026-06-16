@@ -2,34 +2,38 @@ package controllers
 
 import (
 	"context"
+	"sdp/controllers/dispatcher"
+	"sdp/controllers/dlr"
+	"sdp/controllers/mno_router"
+	"sdp/controllers/publisher"
+	"sdp/controllers/ratelimiter"
+	"sdp/controllers/worker"
 	"sdp/data"
-	"sdp/dispatcher"
-	"sdp/queue"
 
 	amqplib "github.com/rabbitmq/amqp091-go"
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
 
-// Controller is the top-level Service Delivery Platform container.
-// It owns the lifecycle of every subcomponent and is the single
+// SDP is the top-level Service Delivery Platform container.
+// It owns the lifecycle of every sub-component and is the single
 // value wired into App.Initialize via dependency injection.
-type Controller struct {
+type SDP struct {
 	cfg        *data.AppConfig
 	db         *gorm.DB
-	publisher  *queue.Publisher
-	worker     *queue.Worker
-	reconciler *queue.Reconciler
+	publisher  *publisher.Publisher
+	worker     *worker.Worker
+	reconciler *dlr.Reconciler
 }
 
-// NewController constructs the fully-wired SDP.
+// New constructs the fully-wired SDP.
 // All subcomponents are built here and receive only what they need.
-func NewController(
+func New(
 	ctx context.Context,
 	cfg *data.AppConfig,
 	db *gorm.DB,
 	conn *amqplib.Connection,
-) (*Controller, error) {
+) (*SDP, error) {
 
 	// --- Dispatcher ---------------------------------------------------------
 	// Swap NewSMPP for NewHTTP (or compose both) based on cfg.
@@ -42,18 +46,18 @@ func NewController(
 
 	// --- MNO Router ---------------------------------------------------------
 	// Resolves an MSISDN prefix → MNORoute (name, dispatcher key, TPS ceiling).
-	mnor, err := queue.NewMNORouter(cfg)
+	mnor, err := mno_router.New(cfg)
 	if err != nil {
 		return nil, err
 	}
 
 	// --- Rate Limiter -------------------------------------------------------
 	// Per-MNO token-bucket; constructed from the same route config.
-	rl := queue.NewLimiter(cfg)
+	rl := ratelimiter.New(cfg)
 
 	// --- Publisher ----------------------------------------------------------
 	// Declares the exchange + queue topology once, then exposes Publish/PublishBatch.
-	pub, err := queue.NewPublisher(conn)
+	pub, err := publisher.New(conn)
 	if err != nil {
 		return nil, err
 	}
@@ -61,16 +65,16 @@ func NewController(
 	// --- DLR Reconciler -----------------------------------------------------
 	// Normalises raw Telco status codes → platform statuses, writes DB, triggers
 	// refunds / SSE / client webhooks.
-	rec := queue.NewReconciler(db)
+	rec := dlr.NewReconciler(db)
 
 	// --- Worker -------------------------------------------------------------
 	// Consume loop: broker → router → limiter → dispatcher → DB update.
-	w, err := queue.NewWorker(ctx, cfg, conn, mnor, rl, disp, db)
+	w, err := worker.New(ctx, cfg, conn, mnor, rl, disp, db)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Controller{
+	return &SDP{
 		cfg:        cfg,
 		db:         db,
 		publisher:  pub,
@@ -81,29 +85,29 @@ func NewController(
 
 // Publisher exposes the publisher so the Go Engine (/launch, Scheduler)
 // can enqueue messages without importing the sub-package directly.
-func (ctr *Controller) Publisher() *queue.Publisher {
-	return ctr.publisher
+func (s *SDP) Publisher() *publisher.Publisher {
+	return s.publisher
 }
 
 // Reconciler exposes the DLR reconciler so the Gin DLR webhook handler
 // (registered in router/app.go) can call it directly.
-func (ctr *Controller) Reconciler() *queue.Reconciler {
-	return ctr.reconciler
+func (s *SDP) Reconciler() *dlr.Reconciler {
+	return s.reconciler
 }
 
 // Start launches all background goroutines.
 // Called once from App.Initialize after the HTTP server goroutine is running.
-func (ctr *Controller) Start() {
+func (s *SDP) Start() {
 	logrus.Info("[SDP] Starting worker pool...")
-	ctr.worker.Start()
+	s.worker.Start()
 	logrus.Info("[SDP] ✅ All components running")
 }
 
 // Stop performs a graceful drain.
 // Call this after srv.Shutdown() in main.go so in-flight messages are not lost.
-func (ctr *Controller) Stop() {
+func (s *SDP) Stop() {
 	logrus.Warn("[SDP] Shutting down — draining in-flight messages...")
-	ctr.worker.Stop()
-	ctr.publisher.Close()
+	s.worker.Stop()
+	s.publisher.Close()
 	logrus.Info("[SDP] ✅ Clean shutdown complete")
 }

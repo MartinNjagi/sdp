@@ -1,4 +1,4 @@
-package queue
+package worker
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sdp/controllers/publisher"
 	"sdp/data"
 	"strings"
 	"time"
@@ -27,7 +28,7 @@ import (
 type BulkWorker struct {
 	ctx        context.Context
 	ch         *amqplib.Channel
-	pub        *Publisher
+	pub        *publisher.Publisher
 	db         *gorm.DB
 	httpClient *http.Client
 	poolSize   int
@@ -37,7 +38,7 @@ type BulkWorker struct {
 func newBulkWorker(
 	ctx context.Context,
 	conn *amqplib.Connection,
-	pub *Publisher,
+	pub *publisher.Publisher,
 	db *gorm.DB,
 	poolSize int,
 ) (*BulkWorker, error) {
@@ -76,7 +77,7 @@ func (w *BulkWorker) start(wg interface {
 			w.consume(id)
 		}(i)
 	}
-	logrus.Infof("[BulkWorker] Pool of %d goroutines started on %s", w.poolSize, BulkQueue)
+	logrus.Infof("[BulkWorker] Pool of %d goroutines started on %s", w.poolSize, publisher.QueueBulk)
 }
 
 func (w *BulkWorker) stop() {
@@ -88,7 +89,7 @@ func (w *BulkWorker) stop() {
 func (w *BulkWorker) consume(id int) {
 	tag := fmt.Sprintf("bulk-worker-%d", id)
 	deliveries, err := w.ch.Consume(
-		BulkQueue, tag, false, false, false, false, nil,
+		publisher.QueueBulk, tag, false, false, false, false, nil,
 	)
 	if err != nil {
 		logrus.Errorf("[BulkWorker-%d] Start consume: %v", id, err)

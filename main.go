@@ -9,20 +9,20 @@ import (
 	"os/signal"
 	"sdp/connections"
 	"sdp/docs"
-	"sdp/router"
+	routers "sdp/router"
 	"syscall"
 	"time"
 
 	"github.com/sirupsen/logrus"
 )
 
-// @title           sdp-service API Backend
+// @title           sms-service API Backend
 // @version         1.0
 // @description     This is a REST server for a Gin-based application.
 // @termsOfService  https://dreamhubtech.com/terms/
 
 // @contact.name   API Support
-// @contact.url    https://www.dreamhubtech.com/supportsw
+// @contact.url    https://www.dreamhubtech.com/support
 // @contact.email  support@dreamhubtech.com
 
 // @license.name  Apache 2.0
@@ -53,16 +53,19 @@ func main() {
 
 	// ----- 3. Connections ---------------------------------------------------
 	db := connections.InitDB(cfg)
-	rdc := connections.InitRedis()
+	rdc := connections.InitRedis(cfg)
 	amqp := connections.InitRMQ(cfg)
-
+	s3Client, err := connections.InitMinioClient(cfg)
+	if err != nil {
+		logrus.Fatalf("Failed to initialize MinIO Client: %v", err)
+	}
 	// ----- 4. Application container -----------------------------------------
 	// Initialize wires all services together and constructs the SDP internally.
 	// SDP.Start() is intentionally deferred until AFTER the HTTP server is
 	// running — the DLR webhook routes must be live before workers begin
-	// consuming to prevent DLRs arriving on a 404 endpoint.
-	var app router.App
-	app.Initialize(ctx, cfg, db, rdc, amqp)
+	// consuming to prevent DLRs arriving at a 404 endpoint.
+	var app routers.App
+	app.Initialize(ctx, cfg, db, rdc, amqp, s3Client)
 
 	// ----- 5. HTTP Server ---------------------------------------------------
 	r := app.SetupRouter()

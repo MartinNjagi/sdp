@@ -2,6 +2,7 @@ package connections
 
 import (
 	"encoding/json"
+	"github.com/joho/godotenv"
 	"io"
 	"os"
 	"sdp/data"
@@ -14,6 +15,14 @@ import (
 // Missing required values are logged as fatal — the application should not
 // start with a broken configuration.
 func InitConfig() *data.AppConfig {
+
+	env := os.Getenv("APP_ENV")
+
+	// ONLY load .env locally
+	if env == "local" || env == "development" {
+		_ = godotenv.Load()
+	}
+
 	cfg := &data.AppConfig{
 		Env:        getEnv("APP_ENV", "development"),
 		ServerHost: getEnv("SERVER_HOST", ""),
@@ -31,6 +40,8 @@ func InitConfig() *data.AppConfig {
 		RedisDB:       getEnvInt("REDIS_DB", 0),
 
 		AMQPURL: getEnv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
+
+		WalletURL: getEnv("WALLET_URL", ""),
 
 		WorkerPoolSize: getEnvInt("WORKER_POOL_SIZE", 5),
 
@@ -50,6 +61,10 @@ func InitConfig() *data.AppConfig {
 		AWSAccessKeyID:     getEnv("AWS_ACCESS_KEY_ID", ""),
 		AWSSecretAccessKey: getEnv("AWS_SECRET_ACCESS_KEY", ""),
 		S3Bucket:           getEnv("S3_BUCKET", ""),
+
+		MinioEndpoint:  getEnv("S3_ENDPOINT", ""),
+		MinioAccessKey: getEnv("S3_ACCESS_KEY", ""),
+		MinioSecretKey: getEnv("S3_SECRET_KEY", ""),
 	}
 
 	// Parse MNO_ROUTES JSON.

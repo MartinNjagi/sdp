@@ -1,15 +1,31 @@
-package queue
+package worker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sdp/controllers/dispatcher"
+	"sdp/controllers/mno_router"
+	"sdp/controllers/ratelimiter"
+	"sdp/data"
+
+	"sync"
+	"time"
+
 	amqplib "github.com/rabbitmq/amqp091-go"
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
-	"sdp/connections"
-	"sdp/dispatcher"
-	"sync"
-	"time"
+)
+
+const (
+	// maxRetries is the number of times a message is requeued on a temporary
+	// error before being dead-lettered.
+	maxRetries = 3
+
+	// prefetchCount controls how many unacknowledged messages the broker pushes
+	// to this worker at once. Keeps memory bounded and prevents one slow MNO
+	// from starving others.
+	prefetchCount = 50
 )
 
 // Worker owns the AMQP consumer channel and spawns a configurable pool of
@@ -18,10 +34,10 @@ import (
 //	Dequeue → Route → Rate-limit → Dispatch → DB update → ACK/NACK
 type Worker struct {
 	ctx        context.Context
-	cfg        *connections.Config
+	cfg        *data.AppConfig
 	ch         *amqplib.Channel
-	router     *Router
-	limiter    *Limiter
+	router     *mno_router.Router
+	limiter    *ratelimiter.Limiter
 	dispatcher dispatcher.Dispatcher
 	db         *gorm.DB
 	wg         sync.WaitGroup
@@ -32,7 +48,7 @@ type Worker struct {
 // never blocks message ingestion.
 func New(
 	ctx context.Context,
-	cfg *connections.Config,
+	cfg *data.AppConfig,
 	conn *amqplib.Connection,
 	router *mno_router.Router,
 	limiter *ratelimiter.Limiter,
@@ -100,7 +116,7 @@ func (w *Worker) Stop() {
 func (w *Worker) consume(id int) {
 	tag := fmt.Sprintf("worker-%d", id)
 	deliveries, err := w.ch.Consume(
-		publisher.OutboundQueue,
+		data.OutboundQueue,
 		tag,
 		false, // autoAck=false — we ACK manually after successful dispatch
 		false, // exclusive
@@ -113,7 +129,7 @@ func (w *Worker) consume(id int) {
 		return
 	}
 
-	logrus.Infof("[Worker-%d] Listening on %s", id, publisher.OutboundQueue)
+	logrus.Infof("[Worker-%d] Listening on %s", id, data.OutboundQueue)
 
 	for {
 		select {
@@ -137,7 +153,7 @@ func (w *Worker) handle(workerID int, d amqplib.Delivery) {
 	log := logrus.WithField("worker", workerID)
 
 	// 1. Decode envelope.
-	var env publisher.OutboundEnvelope
+	var env data.OutboundEnvelope
 	if err := json.Unmarshal(d.Body, &env); err != nil {
 		log.Errorf("Malformed envelope — dead-lettering: %v", err)
 		// Unrecoverable: NACK without requeue → dead-letter exchange.
@@ -202,7 +218,7 @@ func (w *Worker) handle(workerID int, d amqplib.Delivery) {
 func (w *Worker) handleDispatchError(
 	log *logrus.Entry,
 	d amqplib.Delivery,
-	env publisher.OutboundEnvelope,
+	env data.OutboundEnvelope,
 	err error,
 ) {
 	var sendErr *dispatcher.SendError
@@ -239,15 +255,15 @@ func (w *Worker) handleDispatchError(
 }
 
 // republish re-enqueues an envelope with an updated retry count.
-func (w *Worker) republish(env publisher.OutboundEnvelope) error {
+func (w *Worker) republish(env data.OutboundEnvelope) error {
 	body, err := json.Marshal(env)
 	if err != nil {
 		return err
 	}
 	return w.ch.PublishWithContext(
 		w.ctx,
-		publisher.OutboundExchange,
-		publisher.OutboundRoutingKey,
+		data.OutboundExchange,
+		data.OutboundRoutingKey,
 		false, false,
 		amqplib.Publishing{
 			ContentType:  "application/json",

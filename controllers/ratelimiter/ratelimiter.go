@@ -1,4 +1,4 @@
-package queue
+package ratelimiter
 
 import (
 	"context"
@@ -21,7 +21,7 @@ type Limiter struct {
 }
 
 // New constructs the Limiter, pre-populating one bucket per configured MNO.
-func NewLimiter(cfg *data.AppConfig) *Limiter {
+func New(cfg *data.AppConfig) *Limiter {
 	l := &Limiter{
 		buckets:    make(map[string]*rate.Limiter),
 		tpsTable:   make(map[string]int),

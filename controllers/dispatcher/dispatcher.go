@@ -27,11 +27,12 @@ type Dispatcher interface {
 // It contains everything needed to transmit the SMS — no DB access required
 // inside the dispatcher layer.
 type Message struct {
-	OutboxID   uint64
-	MSISDN     string
-	SenderID   string
-	Body       string
-	CampaignID *uint64
+	OutboxID    uint64
+	MSISDN      string
+	SenderID    string
+	Body        string
+	CampaignID  *uint64
+	MessageType string
 }
 
 // SendError wraps a dispatch failure with enough context for the Worker to

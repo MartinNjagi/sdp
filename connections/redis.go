@@ -10,13 +10,12 @@ import (
 )
 
 var (
-	DB     *gorm.DB
-	RDB    *redis.Client
-	Ctx    = context.Background()
-	Config *data.AppConfig
+	DB  *gorm.DB
+	RDB *redis.Client
+	Ctx = context.Background()
 )
 
-func InitRedis() *redis.Client {
+func InitRedis(Config *data.AppConfig) *redis.Client {
 	addr := Config.RedisAddr
 
 	opts := &redis.Options{

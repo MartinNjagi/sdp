@@ -1,12 +1,13 @@
-package queue
+package dlr
 
 import (
 	"context"
 	"fmt"
-	"github.com/sirupsen/logrus"
-	"gorm.io/gorm"
 	"strings"
 	"time"
+
+	"github.com/sirupsen/logrus"
+	"gorm.io/gorm"
 )
 
 // RawDLR is the normalised input the Reconciler receives from any DLR source
@@ -130,7 +131,6 @@ func (r *Reconciler) Handle(ctx context.Context, raw RawDLR) error {
 	}
 
 	// 3. Update status in DB.
-
 	if err := r.db.WithContext(ctx).
 		Exec(`UPDATE outboxes SET status = ?, updated_at = ? WHERE id = ?`,
 			platformStatus, time.Now(), record.ID).Error; err != nil {

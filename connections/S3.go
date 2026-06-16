@@ -7,10 +7,16 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"sdp/data"
 )
 
 // InitMinioClient initializes an S3 client configured for local MinIO
-func InitMinioClient(ctx context.Context, endpoint, accessKey, secretKey string) (*s3.Client, error) {
+func InitMinioClient(env *data.AppConfig) (*s3.Client, error) {
+
+	ctx := context.Background()
+	accessKey := env.MinioAccessKey
+	secretKey := env.MinioSecretKey
+	endpoint := env.MinioEndpoint
 
 	// Create a static credentials provider using your MinIO keys
 	creds := credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")

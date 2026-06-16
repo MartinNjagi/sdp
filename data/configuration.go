@@ -54,6 +54,14 @@ type AppConfig struct {
 	AWSAccessKeyID     string // AWS_ACCESS_KEY_ID
 	AWSSecretAccessKey string // AWS_SECRET_ACCESS_KEY
 	S3Bucket           string // S3_BUCKET
+
+	// ----- Minio S3 (file uploads) --------------------------------------------
+	MinioEndpoint  string // AWS_REGION
+	MinioAccessKey string // AWS_ACCESS_KEY_ID
+	MinioSecretKey string // AWS_SECRET_ACCESS_KEY
+	MinioBucket    string // S3_BUCKET
+
+	WalletURL string
 }
 
 // RouteConfig defines one MNO entry in the routing table.

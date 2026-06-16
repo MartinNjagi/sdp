@@ -10,7 +10,6 @@ func InitRMQ(cfg *data.AppConfig) *amqp.Connection {
 
 	uri := cfg.AMQPURL
 
-	logrus.Infof("Connecting to RabbitMQ at %s:%d")
 	conn, err := amqp.Dial(uri)
 
 	if err != nil {
@@ -18,6 +17,7 @@ func InitRMQ(cfg *data.AppConfig) *amqp.Connection {
 
 		return nil
 	}
+	logrus.Info("✓ RabbitMQ connected successfully")
 
 	return conn
 }

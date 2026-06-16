@@ -128,13 +128,13 @@ func (f *Flusher) flush(ctx context.Context) {
 		return
 	}
 
-	total := 0.0
+	total := int64(0)
 	msgs := 0
 	for _, e := range entries {
 		total += e.Amount
 		msgs += e.MessageCount
 	}
-	logrus.Infof("[Flusher] Flushed %.4f KES across %d messages for %d client(s)",
+	logrus.Infof("[Flusher] Flushed %d credits across %d messages for %d client(s)",
 		total, msgs, len(entries))
 }
 
@@ -173,7 +173,7 @@ func (f *Flusher) requeue(ctx context.Context, entries []data.WalletFlushEntry) 
 		}
 		// Re-increment the accumulator — use plain INCRBYFLOAT, not the Lua
 		// script, since we are adding back, not deducting from balance.
-		if err := f.rdc.IncrByFloat(ctx, keys[0], e.Amount).Err(); err != nil {
+		if err := f.rdc.IncrBy(ctx, keys[0], e.Amount).Err(); err != nil {
 			logrus.Errorf("[Flusher] Requeue pending client=%s: %v", e.ClientID, err)
 		}
 		if err := f.rdc.IncrBy(ctx, keys[1], int64(e.MessageCount)).Err(); err != nil {

@@ -1,4 +1,4 @@
-package queue
+package mno_router
 
 import (
 	"fmt"
@@ -35,10 +35,10 @@ type prefixRoute struct {
 	route  MNORoute
 }
 
-// NewMNORouter builds the Router from config.
+// New builds the Router from config.
 // cfg.MNORoutes is a slice of RouteConfig populated from environment variables
 // or a config file, keeping routing table changes outside the binary.
-func NewMNORouter(cfg *data.AppConfig) (*Router, error) {
+func New(cfg *data.AppConfig) (*Router, error) {
 	if len(cfg.MNORoutes) == 0 {
 		return nil, fmt.Errorf("mno_router: no routes configured — set MNO_ROUTES in config")
 	}
