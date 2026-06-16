@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sdp/controllers/mno_router"
 	"sdp/controllers/publisher"
 	"sdp/data"
 	"strings"
+	"sync"
 	"time"
 
 	amqplib "github.com/rabbitmq/amqp091-go"
@@ -21,14 +23,17 @@ import (
 // For each envelope it:
 //  1. Fetches the contact CSV from S3/Minio via the FileURL.
 //  2. Parses each row and compiles the message (template + replacements).
-//  3. Writes an Outbox row per contact.
-//  4. Fan-out publishes a DispatchEnvelope per contact to the standard queue.
+//  3. Resolves the destination carrier and prices the message in credits.
+//  4. Writes an Outbox row per contact.
+//  5. Fan-out publishes a DispatchEnvelope per contact to the standard queue.
 //
 // The BulkWorker never touches the Telco — it is a pure expander.
 type BulkWorker struct {
 	ctx        context.Context
 	ch         *amqplib.Channel
 	pub        *publisher.Publisher
+	router     *mno_router.Router
+	costEngine *data.CostEngine
 	db         *gorm.DB
 	httpClient *http.Client
 	poolSize   int
@@ -39,6 +44,8 @@ func newBulkWorker(
 	ctx context.Context,
 	conn *amqplib.Connection,
 	pub *publisher.Publisher,
+	router *mno_router.Router,
+	costEngine *data.CostEngine,
 	db *gorm.DB,
 	poolSize int,
 ) (*BulkWorker, error) {
@@ -55,21 +62,20 @@ func newBulkWorker(
 	}
 
 	return &BulkWorker{
-		ctx:      ctx,
-		ch:       ch,
-		pub:      pub,
-		db:       db,
-		poolSize: poolSize,
+		ctx:        ctx,
+		ch:         ch,
+		pub:        pub,
+		router:     router,
+		costEngine: costEngine,
+		db:         db,
+		poolSize:   poolSize,
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second, // S3 downloads can be large
 		},
 	}, nil
 }
 
-func (w *BulkWorker) start(wg interface {
-	Add(int)
-	Done()
-}) {
+func (w *BulkWorker) start(wg *sync.WaitGroup) {
 	for i := range w.poolSize {
 		wg.Add(1)
 		go func(id int) {
@@ -155,14 +161,34 @@ func (w *BulkWorker) handle(workerID int, d amqplib.Delivery) {
 		env.CampaignID, len(contacts)-failed, failed)
 }
 
-// processContact compiles a single message, writes the Outbox row, and
-// publishes a DispatchEnvelope to the standard queue.
+// processContact compiles a single message, resolves its carrier and
+// price, writes the Outbox row, and publishes a DispatchEnvelope to the
+// standard queue.
 func (w *BulkWorker) processContact(env data.BulkEnvelope, contact Contact) error {
 	// Compile message from template + contact-level replacements.
 	compiled := compileTemplate(env.TemplateID, contact.Replacements)
 
+	// Resolve the destination carrier so pricing can vary by MNO if the
+	// rate table has a carrier-specific override. A routing failure here
+	// is the same permanent failure the DispatchWorker would hit later —
+	// catching it now avoids paying for an Outbox write and a queue publish
+	// for a message that can never be sent.
+	route, err := w.router.Resolve(contact.MSISDN)
+	if err != nil {
+		return fmt.Errorf("resolve route: %w", err)
+	}
+
+	priced, err := w.costEngine.Price(data.CostRequest{
+		Body:  compiled,
+		Class: data.ClassBulk,
+		MNO:   route.Name,
+	})
+	if err != nil {
+		return fmt.Errorf("price message: %w", err)
+	}
+
 	// Write Outbox row and get the assigned ID.
-	outboxID, err := w.writeOutbox(env, contact.MSISDN, compiled)
+	outboxID, err := w.writeOutbox(env, contact.MSISDN, compiled, priced.TotalCredits)
 	if err != nil {
 		return fmt.Errorf("write outbox: %w", err)
 	}
@@ -176,7 +202,7 @@ func (w *BulkWorker) processContact(env data.BulkEnvelope, contact Contact) erro
 		SenderID:    env.SenderID,
 		Message:     compiled,
 		MessageType: "bulk",
-		Cost:        0, // Pricing engine sets cost; default 0 until wired
+		Cost:        priced.TotalCredits,
 	}
 
 	return w.pub.PublishDispatch(w.ctx, dispatch)
@@ -186,7 +212,7 @@ func (w *BulkWorker) processContact(env data.BulkEnvelope, contact Contact) erro
 // Outbox write
 // --------------------------------------------------------------------------
 
-func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, msisdn, message string) (uint64, error) {
+func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, msisdn, message string, cost int64) (uint64, error) {
 	campaignID := env.CampaignID
 	row := map[string]interface{}{
 		"client_id":   env.ClientID,
@@ -194,6 +220,7 @@ func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, msisdn, message string) 
 		"msisdn":      msisdn,
 		"sender_id":   env.SenderID,
 		"message":     message,
+		"cost":        cost,
 		"status":      "PENDING",
 		"created_at":  time.Now(),
 		"updated_at":  time.Now(),

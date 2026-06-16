@@ -3,12 +3,11 @@ package connections
 import (
 	"encoding/json"
 	"github.com/joho/godotenv"
+	"github.com/sirupsen/logrus"
 	"io"
 	"os"
 	"sdp/data"
 	"strconv"
-
-	"github.com/sirupsen/logrus"
 )
 
 // InitConfig reads all environment variables and returns a populated Config.
@@ -41,9 +40,9 @@ func InitConfig() *data.AppConfig {
 
 		AMQPURL: getEnv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
 
-		WalletURL: getEnv("WALLET_URL", ""),
-
-		WorkerPoolSize: getEnvInt("WORKER_POOL_SIZE", 5),
+		WorkerPoolVIP:      getEnvInt("WORKER_POOL_VIP", 10),
+		WorkerPoolBulk:     getEnvInt("WORKER_POOL_BULK", 2),
+		WorkerPoolStandard: getEnvInt("WORKER_POOL_STANDARD", 5),
 
 		ATAPIKey:   getEnv("AT_API_KEY", ""),
 		ATUsername: getEnv("AT_USERNAME", ""),
@@ -65,6 +64,21 @@ func InitConfig() *data.AppConfig {
 		MinioEndpoint:  getEnv("S3_ENDPOINT", ""),
 		MinioAccessKey: getEnv("S3_ACCESS_KEY", ""),
 		MinioSecretKey: getEnv("S3_SECRET_KEY", ""),
+
+		WalletFlushInterval: getEnvInt("WALLET_FLUSH_INTERVAL", 30),
+		WalletServiceURL:    getEnv("WALLET_SERVICE_URL", ""),
+		WalletBalanceURL:    getEnv("WALLET_BALANCE_URL", ""),
+
+		SSEChannel: getEnv("SSE_REDIS_CHANNEL", "ws:messages"),
+
+		SDPCpID:           getEnv("SDP_CPID", ""),
+		SDPSourceAddress:  getEnv("SDP_SOURCE_ADDRESS", ""),
+		SDPBulkSMSURL:     getEnv("SDP_BULK_SMS_URL", ""),
+		SDPBulkDLRURL:     getEnv("SDP_BULK_SMS_DLR_URL", ""),
+		SDPBulkChannel:    getEnv("SDP_BULK_SMS_CHANNEL", "sms"),
+		SDPSendSMSURL:     getEnv("SDP_SENDSMS_URL", ""),
+		SDPSendSMSChannel: getEnv("SDP_SENDSMS_CHANNEL", "sms"),
+		SDPTokenRedisKey:  getEnv("SDP_TOKEN_REDIS_KEY", "sdp:token"),
 	}
 
 	// Parse MNO_ROUTES JSON.

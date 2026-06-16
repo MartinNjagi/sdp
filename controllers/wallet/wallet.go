@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,7 +65,7 @@ func New(rdc *redis.Client, cfg *data.AppConfig) (*HotWallet, error) {
 
 	logrus.Info("[HotWallet] Lua scripts loaded ✅")
 
-	WalletBalanceURL := fmt.Sprintf("%s/internal/balance", cfg.WalletURL)
+	WalletBalanceURL := cfg.WalletBalanceURL
 
 	return &HotWallet{
 		rdc:                 rdc,
@@ -154,7 +155,7 @@ func (w *HotWallet) SeedBalance(ctx context.Context, clientID string, amount int
 // cache, so a cold Redis never reports zero incorrectly.
 func (w *HotWallet) ReadBalance(ctx context.Context, clientID string) (int64, error) {
 	val, err := w.rdc.Get(ctx, fmt.Sprintf(keyBalance, clientID)).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return w.fetchAndSeedBalance(ctx, clientID)
 	}
 	if err != nil {

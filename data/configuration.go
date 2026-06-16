@@ -28,7 +28,9 @@ type AppConfig struct {
 	// ----- Worker Pool ------------------------------------------------------
 	// WorkerPoolSize controls how many goroutines consume from the outbound queue.
 	// Rule of thumb: start at 5, raise until CPU or MNO TPS ceiling is hit.
-	WorkerPoolSize int // WORKER_POOL_SIZE: default 5
+	WorkerPoolVIP      int // WORKER_POOL_SIZE: default 5
+	WorkerPoolStandard int // WORKER_POOL_SIZE: default 5
+	WorkerPoolBulk     int // WORKER_POOL_SIZE: default 5
 
 	// ----- MNO Routing ------------------------------------------------------
 	// MNORoutes is parsed from MNO_ROUTES (JSON array). See RouteConfig above.
@@ -61,7 +63,26 @@ type AppConfig struct {
 	MinioSecretKey string // AWS_SECRET_ACCESS_KEY
 	MinioBucket    string // S3_BUCKET
 
-	WalletURL string
+	WalletServiceURL    string
+	WalletFlushInterval int
+	WalletBalanceURL    string
+
+	// ----- Safaricom SDP -------------------------------------------------------
+	SDPCpID           string // SDP_CPID
+	SDPSourceAddress  string // SDP_SOURCE_ADDRESS
+	SDPBulkSMSURL     string // SDP_BULK_SMS_URL
+	SDPBulkDLRURL     string // SDP_BULK_SMS_DLR_URL
+	SDPBulkChannel    string // SDP_BULK_SMS_CHANNEL:  default "sms"
+	SDPSendSMSURL     string // SDP_SENDSMS_URL
+	SDPSendSMSChannel string // SDP_SENDSMS_CHANNEL:   default "sms"
+	SDPTokenRedisKey  string // SDP_TOKEN_REDIS_KEY:   default "sdp:token"
+
+	// ----- SSE / Redis Pub/Sub -------------------------------------------------------
+	// The SDP publishes DLR events and campaign progress to this channel.
+	// The Node BFF already subscribes to it — no extra wiring needed beyond
+	// a plain PUBLISH. As long as the event lands here, it gets routed.
+	SSEChannel string // SSE_REDIS_CHANNEL: default "ws:messages"
+
 }
 
 // RouteConfig defines one MNO entry in the routing table.

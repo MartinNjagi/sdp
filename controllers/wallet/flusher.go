@@ -34,12 +34,12 @@ type Flusher struct {
 
 // NewFlusher constructs a Flusher. walletSvcURL is the Core Wallet Service
 // endpoint that accepts a WalletFlushPayload POST.
-func NewFlusher(wallet *HotWallet, rdc *redis.Client, walletSvcURL string, interval time.Duration) *Flusher {
+func NewFlusher(wallet *HotWallet, rdc *redis.Client, walletSvcURL string, interval int) *Flusher {
 	return &Flusher{
 		wallet:        wallet,
 		rdc:           rdc,
 		walletSvcURL:  walletSvcURL,
-		flushInterval: interval,
+		flushInterval: time.Duration(interval),
 		httpClient:    &http.Client{Timeout: 10 * time.Second},
 	}
 }
