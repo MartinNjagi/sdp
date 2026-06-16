@@ -1,0 +1,27 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "This is a REST server for a Gin-based application.",
+        "title": "sdp-service API Backend",
+        "termsOfService": "https://dreamhubtech.com/terms/",
+        "contact": {
+            "name": "API Support",
+            "url": "https://www.dreamhubtech.com/supportsw",
+            "email": "support@dreamhubtech.com"
+        },
+        "license": {
+            "name": "Apache 2.0",
+            "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
+        },
+        "version": "1.0"
+    },
+    "basePath": "/api/v1",
+    "paths": {},
+    "securityDefinitions": {
+        "BearerAuth": {
+            "type": "apiKey",
+            "name": "Authorization",
+            "in": "header"
+        }
+    }
+}

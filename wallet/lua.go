@@ -1,0 +1,98 @@
+package wallet
+
+// All Redis operations that touch both balance and accumulator must be
+// atomic. Lua scripts execute as a single unit inside Redis — no other
+// command can interleave between the check and the deduct, even at 10k TPS.
+
+// luaDeduct atomically:
+//  1. Reads the client's hot balance.
+//  2. If balance >= cost: deducts cost, increments the pending accumulator,
+//     increments the message counter, and returns {1, new_balance}.
+//  3. If balance < cost: returns {0, current_balance} — no state changed.
+//
+// KEYS[1] = wallet:{client_id}:balance
+// KEYS[2] = wallet:{client_id}:pending_deduction
+// KEYS[3] = wallet:{client_id}:pending_count
+// ARGV[1] = cost (float, string representation)
+const luaDeduct = `
+local balance = tonumber(redis.call('GET', KEYS[1]))
+if balance == nil then
+  return {0, "0"}
+end
+
+local cost = tonumber(ARGV[1])
+if balance < cost then
+  return {0, tostring(balance)}
+end
+
+local new_balance = balance - cost
+redis.call('SET', KEYS[1], tostring(new_balance))
+redis.call('INCRBYFLOAT', KEYS[2], cost)
+redis.call('INCR', KEYS[3])
+
+return {1, tostring(new_balance)}
+`
+
+// luaRefund atomically adds an amount back to the hot balance and decrements
+// the accumulator. Called by the DLR reconciler when a message FAILED and
+// the client has RefundOnFailedDelivery enabled.
+//
+// KEYS[1] = wallet:{client_id}:balance
+// KEYS[2] = wallet:{client_id}:pending_deduction
+// KEYS[3] = wallet:{client_id}:pending_count
+// ARGV[1] = refund amount (float, string representation)
+const luaRefund = `
+local amount = tonumber(ARGV[1])
+local current = tonumber(redis.call('GET', KEYS[1]))
+if current == nil then current = 0 end
+
+local new_balance = current + amount
+redis.call('SET', KEYS[1], tostring(new_balance))
+
+local pending = tonumber(redis.call('GET', KEYS[2]))
+if pending ~= nil and pending >= amount then
+  redis.call('INCRBYFLOAT', KEYS[2], -amount)
+  local count = tonumber(redis.call('GET', KEYS[3]))
+  if count ~= nil and count > 0 then
+    redis.call('DECR', KEYS[3])
+  end
+end
+
+return {1, tostring(new_balance)}
+`
+
+// luaFlushAccumulator atomically reads the pending deduction + count for a
+// client and resets both to zero. The flusher calls this per client before
+// sending the batch to the Core Wallet Service.
+//
+// KEYS[1] = wallet:{client_id}:pending_deduction
+// KEYS[2] = wallet:{client_id}:pending_count
+const luaFlushAccumulator = `
+local amount = redis.call('GETSET', KEYS[1], '0')
+local count  = redis.call('GETSET', KEYS[2], '0')
+if amount == false then amount = '0' end
+if count  == false then count  = '0' end
+return {amount, count}
+`
+
+// luaSeedBalance sets the hot wallet balance for a client.
+// Called when the Core Wallet Service pushes a fresh balance snapshot
+// (e.g. on top-up or initial load). Uses SET NX-style: if a balance
+// already exists it is overwritten only when force=1.
+//
+// KEYS[1] = wallet:{client_id}:balance
+// ARGV[1] = amount
+// ARGV[2] = force ("0" = only set if missing, "1" = always overwrite)
+const luaSeedBalance = `
+local force = ARGV[2]
+if force == '1' then
+  redis.call('SET', KEYS[1], ARGV[1])
+  return 1
+end
+local exists = redis.call('EXISTS', KEYS[1])
+if exists == 0 then
+  redis.call('SET', KEYS[1], ARGV[1])
+  return 1
+end
+return 0
+`
