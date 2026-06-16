@@ -6,6 +6,7 @@ import (
 	"sdp/controllers/mno_router"
 	"sdp/controllers/publisher"
 	"sdp/controllers/ratelimiter"
+	"sdp/controllers/storage"
 	"sdp/controllers/wallet"
 	"sdp/data"
 
@@ -29,6 +30,8 @@ type Deps struct {
 	Flusher    *wallet.Flusher
 	CostEngine *data.CostEngine
 	DB         *gorm.DB
+	S3         *storage.S3Service
+	S3Bucket   string
 }
 
 // Worker is the orchestrator — it does NOT consume from RabbitMQ itself.
@@ -56,7 +59,7 @@ type Worker struct {
 // bundle plus ctx/cfg. Called once by SDP.New.
 func New(ctx context.Context, cfg *data.AppConfig, deps Deps) (*Worker, error) {
 
-	bulk, err := newBulkWorker(ctx, deps.Conn, deps.Publisher, deps.Router, deps.CostEngine, deps.DB, cfg.WorkerPoolBulk)
+	bulk, err := newBulkWorker(ctx, deps.Conn, deps.Publisher, deps.Router, deps.CostEngine, deps.DB, deps.S3, cfg.WorkerPoolBulk, cfg.S3Bucket)
 	if err != nil {
 		return nil, err
 	}

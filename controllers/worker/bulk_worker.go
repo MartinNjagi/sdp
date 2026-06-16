@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"sdp/controllers/mno_router"
 	"sdp/controllers/publisher"
+	"sdp/controllers/storage" // Injected S3/Minio Service
 	"sdp/data"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,13 +22,11 @@ import (
 
 // BulkWorker consumes BulkEnvelopes from the bulk queue.
 // For each envelope it:
-//  1. Fetches the contact CSV from S3/Minio via the FileURL.
-//  2. Parses each row and compiles the message (template + replacements).
+//  1. Fetches the contact list from either S3/Minio (CSV) OR the Database.
+//  2. Parses each row/record and compiles the message (template + replacements).
 //  3. Resolves the destination carrier and prices the message in credits.
 //  4. Writes an Outbox row per contact.
 //  5. Fan-out publishes a DispatchEnvelope per contact to the standard queue.
-//
-// The BulkWorker never touches the Telco — it is a pure expander.
 type BulkWorker struct {
 	ctx        context.Context
 	ch         *amqplib.Channel
@@ -35,7 +34,8 @@ type BulkWorker struct {
 	router     *mno_router.Router
 	costEngine *data.CostEngine
 	db         *gorm.DB
-	httpClient *http.Client
+	s3         *storage.S3Service
+	s3Bucket   string
 	poolSize   int
 }
 
@@ -47,15 +47,15 @@ func newBulkWorker(
 	router *mno_router.Router,
 	costEngine *data.CostEngine,
 	db *gorm.DB,
-	poolSize int,
+	s3Svc *storage.S3Service,
+	poolSize int, s3Bucket string,
 ) (*BulkWorker, error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		return nil, fmt.Errorf("bulk worker: open channel: %w", err)
 	}
 
-	// Bulk messages are heavy — fetch only one at a time per goroutine so a
-	// slow S3 download doesn't starve the broker.
+	// Bulk messages are heavy — fetch only one at a time per goroutine.
 	if err := ch.Qos(1, 0, false); err != nil {
 		_ = ch.Close()
 		return nil, fmt.Errorf("bulk worker: set QoS: %w", err)
@@ -68,15 +68,14 @@ func newBulkWorker(
 		router:     router,
 		costEngine: costEngine,
 		db:         db,
+		s3:         s3Svc,
+		s3Bucket:   s3Bucket,
 		poolSize:   poolSize,
-		httpClient: &http.Client{
-			Timeout: 60 * time.Second, // S3 downloads can be large
-		},
 	}, nil
 }
 
 func (w *BulkWorker) start(wg *sync.WaitGroup) {
-	for i := range w.poolSize {
+	for i := 0; i < w.poolSize; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -130,13 +129,27 @@ func (w *BulkWorker) handle(workerID int, d amqplib.Delivery) {
 		"client_id":   env.ClientID,
 	})
 
-	log.Infof("Processing bulk campaign file_url=%s", env.FileURL)
+	var contacts []Contact
+	var fetchErr error
 
-	// 1. Fetch contact list from S3/Minio.
-	contacts, err := w.fetchContacts(env.FileURL)
-	if err != nil {
-		log.Errorf("Fetch contacts: %v", err)
-		_ = d.Nack(false, true) // requeue — S3 may be temporarily unavailable
+	ContactGroupID, _ := strconv.Atoi(env.ContactGroupID)
+
+	// 1. Fetch contact list based on available configuration
+	if env.FileURL != "" {
+		log.Infof("Fetching contacts from FileURL=%s", env.FileURL)
+		contacts, fetchErr = w.fetchContactsFromFile(env.FileURL)
+	} else if ContactGroupID > 0 {
+		log.Infof("Fetching contacts from DB ContactGroupID=%d", ContactGroupID)
+		contacts, fetchErr = w.fetchContactsFromDB(uint64(ContactGroupID))
+	} else {
+		log.Error("Neither file_url nor contact_group_id provided in envelope")
+		_ = d.Nack(false, false) // Dead-letter permanently
+		return
+	}
+
+	if fetchErr != nil {
+		log.Errorf("Fetch contacts failed: %v", fetchErr)
+		_ = d.Nack(false, true) // Requeue — DB or Storage might be temporarily down
 		return
 	}
 
@@ -161,18 +174,9 @@ func (w *BulkWorker) handle(workerID int, d amqplib.Delivery) {
 		env.CampaignID, len(contacts)-failed, failed)
 }
 
-// processContact compiles a single message, resolves its carrier and
-// price, writes the Outbox row, and publishes a DispatchEnvelope to the
-// standard queue.
 func (w *BulkWorker) processContact(env data.BulkEnvelope, contact Contact) error {
-	// Compile message from template + contact-level replacements.
 	compiled := compileTemplate(env.TemplateID, contact.Replacements)
 
-	// Resolve the destination carrier so pricing can vary by MNO if the
-	// rate table has a carrier-specific override. A routing failure here
-	// is the same permanent failure the DispatchWorker would hit later —
-	// catching it now avoids paying for an Outbox write and a queue publish
-	// for a message that can never be sent.
 	route, err := w.router.Resolve(contact.MSISDN)
 	if err != nil {
 		return fmt.Errorf("resolve route: %w", err)
@@ -187,14 +191,11 @@ func (w *BulkWorker) processContact(env data.BulkEnvelope, contact Contact) erro
 		return fmt.Errorf("price message: %w", err)
 	}
 
-	// Write Outbox row and get the assigned ID.
 	outboxID, err := w.writeOutbox(env, contact.MSISDN, compiled, priced.TotalCredits)
 	if err != nil {
 		return fmt.Errorf("write outbox: %w", err)
 	}
 
-	// Publish DispatchEnvelope to the standard queue.
-	// Bulk campaigns are never VIP — they go through the standard lane.
 	dispatch := data.DispatchEnvelope{
 		OutboxID:    outboxID,
 		ClientID:    env.ClientID,
@@ -231,10 +232,7 @@ func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, msisdn, message string, 
 		return 0, result.Error
 	}
 
-	// Retrieve the inserted ID.
-	var outbox struct {
-		ID uint64
-	}
+	var outbox struct{ ID uint64 }
 	w.db.Table("outboxes").
 		Where("client_id = ? AND msisdn = ? AND campaign_id = ?", env.ClientID, msisdn, campaignID).
 		Order("created_at DESC").
@@ -245,39 +243,88 @@ func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, msisdn, message string, 
 }
 
 // --------------------------------------------------------------------------
-// S3/Minio contact fetch
+// Contact fetching sources
 // --------------------------------------------------------------------------
 
-// Contact represents a single parsed row from the campaign CSV.
+// Contact represents a single parsed contact with its metadata.
 type Contact struct {
 	MSISDN       string
-	Replacements map[string]string // column_name → value for template substitution
+	Replacements map[string]string // Key → value for template substitution
 }
 
-// fetchContacts downloads the CSV from the FileURL and parses it into contacts.
-// The CSV must have at minimum a "msisdn" column. All other columns are passed
-// as template replacements keyed by column header name.
-func (w *BulkWorker) fetchContacts(fileURL string) ([]Contact, error) {
-	resp, err := w.httpClient.Get(fileURL)
+// fetchContactsFromDB queries the normalized address book tables for all
+// active members of a contact group. It automatically drops blacklisted numbers.
+func (w *BulkWorker) fetchContactsFromDB(groupID uint64) ([]Contact, error) {
+	// Struct to capture the specific projection from our JOIN query
+	type addressBookEntry struct {
+		MSISDN      string
+		ContactName string
+	}
+
+	var entries []addressBookEntry
+
+	// Perform the multi-table JOIN:
+	// contact_group_members -> client_address_books -> phone_numbers
+	err := w.db.Table("contact_group_members AS cgm").
+		Select("pn.msisdn, cab.contact_name").
+		Joins("JOIN client_address_books AS cab ON cgm.client_id = cab.client_id AND cgm.phone_id = cab.phone_id").
+		Joins("JOIN phone_numbers AS pn ON cab.phone_id = pn.id").
+		Where("cgm.group_id = ?", groupID).
+		Where("cab.is_blacklisted = ?", false). // Automatically drop opted-out/blacklisted numbers
+		Find(&entries).Error
+
 	if err != nil {
-		return nil, fmt.Errorf("http get file_url: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("file_url returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("query contacts from db: %w", err)
 	}
 
-	reader := csv.NewReader(resp.Body)
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("no valid, non-blacklisted contacts found for group_id=%d", groupID)
+	}
+
+	var contacts []Contact
+	for _, entry := range entries {
+		msisdn := strings.TrimSpace(entry.MSISDN)
+		if msisdn == "" {
+			continue // Failsafe
+		}
+
+		// Map the fields to template replacements.
+		// We add a few variations so users can use {{name}} or {{contact_name}} in templates.
+		replacements := map[string]string{
+			"msisdn":       msisdn,
+			"contact_name": entry.ContactName,
+			"name":         entry.ContactName,
+		}
+
+		contacts = append(contacts, Contact{
+			MSISDN:       msisdn,
+			Replacements: replacements,
+		})
+	}
+
+	return contacts, nil
+}
+
+// fetchContactsFromFile streams the CSV using the raw file key and default bucket.
+func (w *BulkWorker) fetchContactsFromFile(fileKey string) ([]Contact, error) {
+	// Optional safeguard: strip leading slashes if they exist
+	fileKey = strings.TrimPrefix(fileKey, "/")
+
+	// Use DownloadByKey instead of the URI parser
+	stream, err := w.s3.DownloadByKey(w.ctx, w.s3Bucket, fileKey)
+	if err != nil {
+		return nil, fmt.Errorf("s3 download key: %w", err)
+	}
+	defer stream.Close()
+
+	reader := csv.NewReader(stream)
 	reader.TrimLeadingSpace = true
 
-	// Read header row.
 	headers, err := reader.Read()
 	if err != nil {
 		return nil, fmt.Errorf("read CSV headers: %w", err)
 	}
 
-	// Normalise headers to lowercase for consistent lookup.
 	for i, h := range headers {
 		headers[i] = strings.ToLower(strings.TrimSpace(h))
 	}
@@ -289,6 +336,7 @@ func (w *BulkWorker) fetchContacts(fileURL string) ([]Contact, error) {
 			break
 		}
 	}
+
 	if msisdnIdx == -1 {
 		return nil, fmt.Errorf("CSV missing 'msisdn' column (found: %v)", headers)
 	}
@@ -304,7 +352,7 @@ func (w *BulkWorker) fetchContacts(fileURL string) ([]Contact, error) {
 		}
 
 		if len(row) <= msisdnIdx {
-			continue // skip malformed rows
+			continue
 		}
 
 		replacements := make(map[string]string, len(headers))
@@ -328,7 +376,6 @@ func (w *BulkWorker) fetchContacts(fileURL string) ([]Contact, error) {
 // --------------------------------------------------------------------------
 
 // compileTemplate performs {{key}} substitution on the template body.
-// Keys are looked up in replacements; unmatched placeholders are left as-is.
 func compileTemplate(template string, replacements map[string]string) string {
 	result := template
 	for key, value := range replacements {

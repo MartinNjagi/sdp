@@ -55,7 +55,7 @@ func main() {
 	db := connections.InitDB(cfg)
 	rdc := connections.InitRedis(cfg)
 	amqp := connections.InitRMQ(cfg)
-	s3Client, err := connections.InitMinioClient(cfg)
+	s3Client, err := connections.InitStorageClient(ctx, cfg)
 	if err != nil {
 		logrus.Fatalf("Failed to initialize MinIO Client: %v", err)
 	}

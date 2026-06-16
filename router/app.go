@@ -47,7 +47,7 @@ func (a *App) Initialize(
 	// --- SDP ----------------------------------------------------------------
 	// Pass only the primitives the SDP needs. It builds its own subcomponents
 	// internally — the App doesn't need to know about workers or dispatchers.
-	sdp, err := controllers.New(ctx, cfg, db, rdc, amqp)
+	sdp, err := controllers.New(ctx, cfg, db, rdc, amqp, s3Client)
 	if err != nil {
 		logrus.Fatalf("Failed to initialise SDP: %v", err)
 	}

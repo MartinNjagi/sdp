@@ -3,11 +3,13 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"sdp/controllers/dispatcher"
 	"sdp/controllers/dlr"
 	"sdp/controllers/mno_router"
 	"sdp/controllers/publisher"
 	"sdp/controllers/ratelimiter"
+	"sdp/controllers/storage"
 	"sdp/controllers/wallet"
 	"sdp/controllers/worker"
 	"sdp/data"
@@ -41,6 +43,7 @@ func New(
 	db *gorm.DB,
 	rdc *redis.Client,
 	conn *amqplib.Connection,
+	rawStorageClient *s3.Client,
 ) (*SDP, error) {
 
 	// --- Publisher -----------------------------------------------------
@@ -109,6 +112,8 @@ func New(
 	// WebhookFirer (client-configured outbound webhooks) is attached by
 	// App.Initialize once that service exists — see router/app.go.
 
+	s3Svc := storage.NewS3Service(rawStorageClient)
+
 	// --- Worker ---------------------------------------------------------
 	// Three sub-pools: bulk fan-out, VIP dispatch, standard dispatch.
 	// Every shared collaborator is bundled into a single worker.Deps value
@@ -122,6 +127,7 @@ func New(
 		HotWallet:  hotWallet,
 		Flusher:    flusher,
 		DB:         db,
+		S3:         s3Svc,
 	}
 	w, err := worker.New(ctx, cfg, deps)
 	if err != nil {
