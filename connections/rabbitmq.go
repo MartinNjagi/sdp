@@ -1,26 +1,16 @@
 package connections
 
 import (
-	"fmt"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/sirupsen/logrus"
 	"sdp/data"
 )
 
 func InitRMQ(cfg *data.AppConfig) *amqp.Connection {
-	host := cfg.RMQHost
-	user := cfg.RMQUser
-	pass := cfg.RMQPassword
-	port := cfg.RMQPort
-	vhost := cfg.RMQVHost
 
-	uri := fmt.Sprintf("amqps://%s:%s@%s:%d/%s", user, pass, host, port, vhost)
+	uri := cfg.AMQPURL
 
-	if cfg.Env == "local" {
-		uri = fmt.Sprintf("amqp://%s:%s@%s:%d", user, pass, host, port)
-	}
-
-	logrus.Infof("Connecting to RabbitMQ at %s:%d", host, port)
+	logrus.Infof("Connecting to RabbitMQ at %s:%d")
 	conn, err := amqp.Dial(uri)
 
 	if err != nil {
