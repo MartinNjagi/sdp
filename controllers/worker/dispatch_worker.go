@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sdp/controllers/dispatcher"
 	"sdp/controllers/mno_router"
@@ -245,7 +246,8 @@ func (w *DispatchWorker) handleDispatchError(
 	err error,
 ) {
 	retryable := false
-	if se, ok := err.(*dispatcher.SendError); ok {
+	var se *dispatcher.SendError
+	if errors.As(err, &se) {
 		retryable = se.Retryable
 	}
 

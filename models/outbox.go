@@ -29,3 +29,14 @@ type Outbox struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
+
+// Template represents the database model for SMS templates.
+type Template struct {
+	ID        uint   `gorm:"primaryKey"`
+	ClientID  uint   `gorm:"index;not null"`
+	Name      string `gorm:"type:varchar(100);not null"`
+	Content   string `gorm:"type:text;not null"`
+	Status    string `gorm:"type:varchar(20);default:'PENDING'"` // PENDING, APPROVED, REJECTED
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}

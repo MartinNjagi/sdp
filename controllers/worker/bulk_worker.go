@@ -155,10 +155,30 @@ func (w *BulkWorker) handle(workerID int, d amqplib.Delivery) {
 
 	log.Infof("Fetched %d contacts for campaign_id=%d", len(contacts), env.CampaignID)
 
+	// ---Pre-fetch the Template ---
+	var templateBody string
+
+	// Assuming env.TemplateID is the primary key of your templates table
+	if err := w.db.Table("templates").
+		Select("content"). // Just grab the string content you need
+		Where("id = ? or name = ?", env.TemplateID, env.TemplateID).
+		Scan(&templateBody).Error; err != nil {
+
+		log.Errorf("Failed to fetch template id=%v: %v", env.TemplateID, err)
+		_ = d.Nack(false, false) // Dead-letter, cannot proceed without template
+		return
+	}
+
+	if templateBody == "" {
+		log.Errorf("Template id=%v is empty", env.TemplateID)
+		_ = d.Nack(false, false)
+		return
+	}
+
 	// 2. Fan-out: compile + write Outbox + publish per contact.
 	failed := 0
 	for _, contact := range contacts {
-		if err := w.processContact(env, contact); err != nil {
+		if err := w.processContact(env, templateBody, contact); err != nil {
 			log.Errorf("processContact msisdn=%s: %v", contact.MSISDN, err)
 			failed++
 			// Continue — partial failure is acceptable for bulk campaigns.
@@ -174,8 +194,28 @@ func (w *BulkWorker) handle(workerID int, d amqplib.Delivery) {
 		env.CampaignID, len(contacts)-failed, failed)
 }
 
-func (w *BulkWorker) processContact(env data.BulkEnvelope, contact Contact) error {
-	compiled := compileTemplate(env.TemplateID, contact.Replacements)
+// Local struct mapping just for the FirstOrCreate check
+type PhoneNumber struct {
+	ID     uint64 `gorm:"primaryKey;autoIncrement"`
+	MSISDN string `gorm:"column:msisdn"`
+}
+
+func (w *BulkWorker) processContact(env data.BulkEnvelope, templateBody string, contact Contact) error {
+	// PRECHECK: Ensure we have a PhoneID
+	if contact.PhoneID == 0 {
+		var pn PhoneNumber
+		err := w.db.Table("phone_numbers").
+			Where("msisdn = ?", contact.MSISDN).
+			FirstOrCreate(&pn, map[string]interface{}{"msisdn": contact.MSISDN}).Error
+
+		if err != nil {
+			return fmt.Errorf("failed to resolve phone_id: %w", err)
+		}
+		contact.PhoneID = pn.ID
+	}
+
+	// USE THE PRE-FETCHED STRING HERE:
+	compiled := compileTemplate(templateBody, contact.Replacements)
 
 	route, err := w.router.Resolve(contact.MSISDN)
 	if err != nil {
@@ -191,11 +231,13 @@ func (w *BulkWorker) processContact(env data.BulkEnvelope, contact Contact) erro
 		return fmt.Errorf("price message: %w", err)
 	}
 
-	outboxID, err := w.writeOutbox(env, contact.MSISDN, compiled, priced.TotalCredits)
+	// Write Outbox row
+	outboxID, err := w.writeOutbox(env, contact.PhoneID, contact.MSISDN, compiled, priced.TotalCredits)
 	if err != nil {
 		return fmt.Errorf("write outbox: %w", err)
 	}
 
+	// Publish DispatchEnvelope
 	dispatch := data.DispatchEnvelope{
 		OutboxID:    outboxID,
 		ClientID:    env.ClientID,
@@ -213,11 +255,12 @@ func (w *BulkWorker) processContact(env data.BulkEnvelope, contact Contact) erro
 // Outbox write
 // --------------------------------------------------------------------------
 
-func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, msisdn, message string, cost int64) (uint64, error) {
+func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, phoneID uint64, msisdn, message string, cost int64) (uint64, error) {
 	campaignID := env.CampaignID
 	row := map[string]interface{}{
 		"client_id":   env.ClientID,
 		"campaign_id": campaignID,
+		"phone_id":    phoneID, // <-- Insert the database ID here
 		"msisdn":      msisdn,
 		"sender_id":   env.SenderID,
 		"message":     message,
@@ -232,6 +275,7 @@ func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, msisdn, message string, 
 		return 0, result.Error
 	}
 
+	// Retrieve the inserted ID.
 	var outbox struct{ ID uint64 }
 	w.db.Table("outboxes").
 		Where("client_id = ? AND msisdn = ? AND campaign_id = ?", env.ClientID, msisdn, campaignID).
@@ -248,6 +292,7 @@ func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, msisdn, message string, 
 
 // Contact represents a single parsed contact with its metadata.
 type Contact struct {
+	PhoneID      uint64 // <-- Added to hold the DB reference
 	MSISDN       string
 	Replacements map[string]string // Key → value for template substitution
 }
@@ -257,20 +302,20 @@ type Contact struct {
 func (w *BulkWorker) fetchContactsFromDB(groupID uint64) ([]Contact, error) {
 	// Struct to capture the specific projection from our JOIN query
 	type addressBookEntry struct {
+		PhoneID     uint64 `gorm:"column:phone_id"` // <-- Added
 		MSISDN      string
 		ContactName string
 	}
 
 	var entries []addressBookEntry
 
-	// Perform the multi-table JOIN:
-	// contact_group_members -> client_address_books -> phone_numbers
+	// Perform the multi-table JOIN and grab pn.id
 	err := w.db.Table("contact_group_members AS cgm").
-		Select("pn.msisdn, cab.contact_name").
+		Select("pn.id AS phone_id, pn.msisdn, cab.contact_name"). // <-- Selected pn.id
 		Joins("JOIN client_address_books AS cab ON cgm.client_id = cab.client_id AND cgm.phone_id = cab.phone_id").
 		Joins("JOIN phone_numbers AS pn ON cab.phone_id = pn.id").
 		Where("cgm.group_id = ?", groupID).
-		Where("cab.is_blacklisted = ?", false). // Automatically drop opted-out/blacklisted numbers
+		Where("cab.is_blacklisted = ?", false).
 		Find(&entries).Error
 
 	if err != nil {
@@ -285,11 +330,9 @@ func (w *BulkWorker) fetchContactsFromDB(groupID uint64) ([]Contact, error) {
 	for _, entry := range entries {
 		msisdn := strings.TrimSpace(entry.MSISDN)
 		if msisdn == "" {
-			continue // Failsafe
+			continue
 		}
 
-		// Map the fields to template replacements.
-		// We add a few variations so users can use {{name}} or {{contact_name}} in templates.
 		replacements := map[string]string{
 			"msisdn":       msisdn,
 			"contact_name": entry.ContactName,
@@ -297,6 +340,7 @@ func (w *BulkWorker) fetchContactsFromDB(groupID uint64) ([]Contact, error) {
 		}
 
 		contacts = append(contacts, Contact{
+			PhoneID:      entry.PhoneID, // <-- Map the ID
 			MSISDN:       msisdn,
 			Replacements: replacements,
 		})
@@ -375,12 +419,34 @@ func (w *BulkWorker) fetchContactsFromFile(fileKey string) ([]Contact, error) {
 // Template compilation
 // --------------------------------------------------------------------------
 
-// compileTemplate performs {{key}} substitution on the template body.
+// compileTemplate performs substitution on the template body.
+// Supports {{key}}, {key}, and [key] formats, ignoring spaces and case.
 func compileTemplate(template string, replacements map[string]string) string {
 	result := template
+
 	for key, value := range replacements {
+		// Because replacements map keys are forced to lowercase during extraction,
+		// we generate an uppercase version to match tags like [CODE] or {NAME}.
+		upperKey := strings.ToUpper(key)
+
+		// 1. Double curly braces: {{name}} or {{NAME}}
 		result = strings.ReplaceAll(result, "{{"+key+"}}", value)
+		result = strings.ReplaceAll(result, "{{"+upperKey+"}}", value)
 		result = strings.ReplaceAll(result, "{{ "+key+" }}", value)
+		result = strings.ReplaceAll(result, "{{ "+upperKey+" }}", value)
+
+		// 2. Single curly braces: {name} or {NAME}
+		result = strings.ReplaceAll(result, "{"+key+"}", value)
+		result = strings.ReplaceAll(result, "{"+upperKey+"}", value)
+		result = strings.ReplaceAll(result, "{ "+key+" }", value)
+		result = strings.ReplaceAll(result, "{ "+upperKey+" }", value)
+
+		// 3. Square brackets: [code] or [CODE]
+		result = strings.ReplaceAll(result, "["+key+"]", value)
+		result = strings.ReplaceAll(result, "["+upperKey+"]", value)
+		result = strings.ReplaceAll(result, "[ "+key+" ]", value)
+		result = strings.ReplaceAll(result, "[ "+upperKey+" ]", value)
 	}
+
 	return result
 }

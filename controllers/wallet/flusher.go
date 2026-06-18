@@ -21,8 +21,8 @@ const (
 )
 
 // Flusher runs a background ticker that drains the per-client pending
-// accumulators and ships a single batched HTTP POST to the Core Wallet
-// Service every FlushInterval. This decouples the hot path (Lua deductions
+// accumulators and ships HTTP POSTs to the Core Wallet Service
+// every FlushInterval. This decouples the hot path (Lua deductions
 // at 10k TPS) from the cold path (PostgreSQL ledger writes).
 type Flusher struct {
 	wallet        *HotWallet
@@ -120,27 +120,34 @@ func (f *Flusher) flush(ctx context.Context) {
 		return
 	}
 
-	// 3. Ship a single HTTP POST to the Core Wallet Service.
-	if err := f.sendBatch(ctx, entries); err != nil {
-		logrus.Errorf("[Flusher] Batch send failed: %v — will retry next tick", err)
-		// Re-seed accumulators so deductions are not lost.
-		f.requeue(ctx, entries)
-		return
-	}
-
+	// 3. Ship HTTP POSTs to the Core Wallet Service per entry.
 	total := int64(0)
 	msgs := 0
-	for _, e := range entries {
-		total += e.Amount
-		msgs += e.MessageCount
+	successCount := 0
+
+	for _, entry := range entries {
+		if err := f.sendEntry(ctx, entry); err != nil {
+			logrus.Errorf("[Flusher] Send failed for client=%s: %v — will retry next tick", entry.ClientID, err)
+			// Re-seed ONLY the failed accumulator so deductions are not lost.
+			f.requeue(ctx, []data.WalletFlushEntry{entry})
+			continue
+		}
+
+		total += entry.Amount
+		msgs += entry.MessageCount
+		successCount++
 	}
-	logrus.Infof("[Flusher] Flushed %d credits across %d messages for %d client(s)",
-		total, msgs, len(entries))
+
+	if successCount > 0 {
+		logrus.Infof("[Flusher] Flushed %d credits across %d messages for %d client(s)",
+			total, msgs, successCount)
+	}
 }
 
-func (f *Flusher) sendBatch(ctx context.Context, entries []data.WalletFlushEntry) error {
-	payload := data.WalletFlushPayload{Entries: entries}
-	body, err := json.Marshal(payload)
+// sendEntry ships a single flush entry to the Core Wallet Service.
+func (f *Flusher) sendEntry(ctx context.Context, entry data.WalletFlushEntry) error {
+
+	body, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("marshal flush payload: %w", err)
 	}
@@ -164,7 +171,7 @@ func (f *Flusher) sendBatch(ctx context.Context, entries []data.WalletFlushEntry
 }
 
 // requeue adds deductions back into the accumulators so they are retried
-// on the next flush tick. Called when the HTTP batch send fails.
+// on the next flush tick. Called when an HTTP send fails.
 func (f *Flusher) requeue(ctx context.Context, entries []data.WalletFlushEntry) {
 	for _, e := range entries {
 		keys := []string{

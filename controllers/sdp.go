@@ -114,6 +114,8 @@ func New(
 
 	s3Svc := storage.NewS3Service(rawStorageClient)
 
+	costEngine := data.NewCostEngine(nil, 10)
+
 	// --- Worker ---------------------------------------------------------
 	// Three sub-pools: bulk fan-out, VIP dispatch, standard dispatch.
 	// Every shared collaborator is bundled into a single worker.Deps value
@@ -127,6 +129,7 @@ func New(
 		HotWallet:  hotWallet,
 		Flusher:    flusher,
 		DB:         db,
+		CostEngine: costEngine,
 		S3:         s3Svc,
 	}
 	w, err := worker.New(ctx, cfg, deps)
