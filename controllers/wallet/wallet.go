@@ -77,32 +77,62 @@ func New(rdc *redis.Client, cfg *data.AppConfig, client *http.Client) (*HotWalle
 	}, nil
 }
 
-// Deduct atomically checks and deducts the message cost (credits) from the
-// client's hot balance. Returns DeductCreditResult.Success=false if the
-// client has insufficient credits. Called on the critical path before
-// every Send — must stay fast.
+// Deduct attempts to reserve credits for a message. If the cache is cold,
+// it automatically pauses, fetches the live balance from the Core Wallet
+// Service, seeds Redis, and retries the deduction.
 func (w *HotWallet) Deduct(ctx context.Context, req data.DeductCreditRequest) (*data.DeductCreditResult, error) {
+	clientIDStr := fmt.Sprintf("%d", req.ClientID)
 	keys := []string{
-		fmt.Sprintf(keyBalance, req.ClientID),
-		fmt.Sprintf(keyPending, req.ClientID),
-		fmt.Sprintf(keyCount, req.ClientID),
+		fmt.Sprintf(keyBalance, clientIDStr),
+		fmt.Sprintf(keyPending, clientIDStr),
+		fmt.Sprintf(keyCount, clientIDStr),
 	}
 
-	result, err := w.evalWithReload(ctx, &w.shaDeduct, luaDeduct, keys, strconv.FormatInt(req.Amount, 10))
+	// 1. Attempt the fast-path deduction using your auto-reloading eval
+	res, err := w.evalWithReload(ctx, &w.shaDeduct, luaDeduct, keys, req.Amount)
 	if err != nil {
-		return nil, fmt.Errorf("hot wallet: deduct client=%s: %w", req.ClientID, err)
+		return nil, fmt.Errorf("lua deduct error: %w", err)
 	}
 
-	vals := result.([]interface{})
-	success := vals[0].(int64) == 1
-	balanceAfter, _ := strconv.ParseInt(vals[1].(string), 10, 64)
+	// 2. Check for the "Cold Cache" signal (-1)
+	if val, ok := res.(int64); ok && val == -1 {
+		logrus.Infof("[HotWallet] Cold cache for client=%s. Fetching from Wallet Service...", clientIDStr)
 
-	if !success {
-		logrus.Warnf("[HotWallet] Insufficient credits client=%s required=%d balance=%d",
-			req.ClientID, req.Amount, balanceAfter)
+		// Heal the cache by reading from the HTTP endpoint
+		_, seedErr := w.ReadBalance(ctx, clientIDStr)
+		if seedErr != nil {
+			return nil, fmt.Errorf("failed to seed cold wallet cache: %w", seedErr)
+		}
+
+		// Retry the exact same Lua script now that Redis is fully warm
+		res, err = w.evalWithReload(ctx, &w.shaDeduct, luaDeduct, keys, req.Amount)
+		if err != nil {
+			return nil, fmt.Errorf("lua deduct retry error: %w", err)
+		}
 	}
 
-	return &data.DeductCreditResult{Success: success, BalanceAfter: balanceAfter}, nil
+	// 3. Parse the final Lua array response: {SuccessCode, BalanceString}
+	arr, ok := res.([]interface{})
+	if !ok || len(arr) != 2 {
+		return nil, fmt.Errorf("unexpected lua response format: %v", res)
+	}
+
+	successCode, ok1 := arr[0].(int64)
+	balanceStr, ok2 := arr[1].(string)
+
+	if !ok1 || !ok2 {
+		return nil, fmt.Errorf("failed to type-assert lua array elements")
+	}
+
+	balanceAfter, err := strconv.ParseInt(balanceStr, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse returned balance: %w", err)
+	}
+
+	return &data.DeductCreditResult{
+		Success:      successCode == 1,
+		BalanceAfter: balanceAfter,
+	}, nil
 }
 
 // Refund atomically credits an amount back to the hot balance and

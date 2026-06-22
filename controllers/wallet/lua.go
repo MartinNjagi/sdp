@@ -8,22 +8,25 @@ package wallet
 // currency — so every script uses INCRBY/DECRBY rather than float ops.
 
 // luaDeduct atomically:
-//  1. Reads the client's hot balance (credits).
-//  2. If balance >= cost: deducts cost, increments the pending accumulator
-//     and message counter, returns {1, new_balance}.
-//  3. If balance < cost: returns {0, current_balance} — no state changed.
+//  1. Checks if the balance key exists. If not, returns -1 (Cold Cache).
+//  2. Reads the client's hot balance (credits).
+//  3. If balance >= cost: deducts cost, increments the pending accumulator
+//     and message counter, returns {1, "new_balance"}.
+//  4. If balance < cost: returns {0, "current_balance"} — no state changed.
 //
 // KEYS[1] = wallet:{client_id}:balance
 // KEYS[2] = wallet:{client_id}:pending_deduction
 // KEYS[3] = wallet:{client_id}:pending_count
 // ARGV[1] = cost (integer credits, string representation)
 const luaDeduct = `
-local balance = tonumber(redis.call('GET', KEYS[1]))
-if balance == nil then
-  return {0, "0"}
+local balanceStr = redis.call('GET', KEYS[1])
+if balanceStr == false then
+  return -1 -- COLD CACHE SIGNAL
 end
 
+local balance = tonumber(balanceStr)
 local cost = tonumber(ARGV[1])
+
 if balance < cost then
   return {0, tostring(balance)}
 end
