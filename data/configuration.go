@@ -55,7 +55,8 @@ type AppConfig struct {
 	SMPPMode     string // SMPP_MODE: "transceiver" | "transmitter"
 
 	// ----- JWT / Auth -------------------------------------------------------
-	JWTSecret string // JWT_SECRET
+	JWTSecret            string // JWT_SECRET
+	InternalServiceToken string // Internal Service Token
 
 	// ----- AWS S3 (file uploads) --------------------------------------------
 	AWSRegion          string // AWS_REGION

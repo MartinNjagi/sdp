@@ -14,7 +14,6 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 	"strconv"
-	"time"
 )
 
 const (
@@ -43,7 +42,7 @@ type HotWallet struct {
 }
 
 // New constructs a HotWallet and pre-loads all Lua scripts into Redis.
-func New(rdc *redis.Client, cfg *data.AppConfig) (*HotWallet, error) {
+func New(rdc *redis.Client, cfg *data.AppConfig, client *http.Client) (*HotWallet, error) {
 	ctx := context.Background()
 
 	shaDeduct, err := rdc.ScriptLoad(ctx, luaDeduct).Result()
@@ -70,7 +69,7 @@ func New(rdc *redis.Client, cfg *data.AppConfig) (*HotWallet, error) {
 	return &HotWallet{
 		rdc:                 rdc,
 		balanceURL:          WalletBalanceURL,
-		httpClient:          &http.Client{Timeout: 10 * time.Second},
+		httpClient:          client,
 		shaDeduct:           shaDeduct,
 		shaRefund:           shaRefund,
 		shaFlushAccumulator: shaFlush,

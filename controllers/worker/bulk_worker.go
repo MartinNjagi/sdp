@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sdp/connections"
 	"sdp/controllers/mno_router"
 	"sdp/controllers/publisher"
-	"sdp/controllers/storage" // Injected S3/Minio Service
+	"sdp/controllers/storage"
 	"sdp/data"
 	"strconv"
 	"strings"
@@ -21,14 +22,9 @@ import (
 )
 
 // BulkWorker consumes BulkEnvelopes from the bulk queue.
-// For each envelope it:
-//  1. Fetches the contact list from either S3/Minio (CSV) OR the Database.
-//  2. Parses each row/record and compiles the message (template + replacements).
-//  3. Resolves the destination carrier and prices the message in credits.
-//  4. Writes an Outbox row per contact.
-//  5. Fan-out publishes a DispatchEnvelope per contact to the standard queue.
 type BulkWorker struct {
 	ctx        context.Context
+	RMQManager *connections.RMQManager // Replaces raw amqplib.Connection
 	ch         *amqplib.Channel
 	pub        *publisher.Publisher
 	router     *mno_router.Router
@@ -42,20 +38,22 @@ type BulkWorker struct {
 // newBulkWorker constructs a BulkWorker with its own dedicated AMQP channel.
 func newBulkWorker(
 	ctx context.Context,
-	conn *amqplib.Connection,
+	rmqManager *connections.RMQManager, // Injected Manager
 	pub *publisher.Publisher,
 	router *mno_router.Router,
 	costEngine *data.CostEngine,
 	db *gorm.DB,
 	s3Svc *storage.S3Service,
-	poolSize int, s3Bucket string,
+	poolSize int,
+	s3Bucket string,
 ) (*BulkWorker, error) {
-	ch, err := conn.Channel()
+
+	// FIX: Use the manager's connection to open the channel
+	ch, err := rmqManager.Conn.Channel()
 	if err != nil {
 		return nil, fmt.Errorf("bulk worker: open channel: %w", err)
 	}
 
-	// Bulk messages are heavy — fetch only one at a time per goroutine.
 	if err := ch.Qos(1, 0, false); err != nil {
 		_ = ch.Close()
 		return nil, fmt.Errorf("bulk worker: set QoS: %w", err)
@@ -63,6 +61,7 @@ func newBulkWorker(
 
 	return &BulkWorker{
 		ctx:        ctx,
+		RMQManager: rmqManager, // Save manager to struct for reconnects
 		ch:         ch,
 		pub:        pub,
 		router:     router,
@@ -85,7 +84,26 @@ func (w *BulkWorker) start(wg *sync.WaitGroup) {
 	logrus.Infof("[BulkWorker] Pool of %d goroutines started on %s", w.poolSize, publisher.QueueBulk)
 }
 
-func (w *BulkWorker) stop() {
+// Phase 1: Tell RabbitMQ to stop sending new messages to this worker pool
+func (w *BulkWorker) cancelConsumer() {
+	if w.ch != nil {
+		// Loop through every worker ID in the pool and cancel its specific tag
+		for i := 0; i < w.poolSize; i++ {
+			tag := fmt.Sprintf("bulk-worker-%d", i)
+
+			// This stops new deliveries for this specific goroutine,
+			// but keeps the channel OPEN so we can still ACK messages we already have.
+			if err := w.ch.Cancel(tag, false); err != nil {
+				logrus.Warnf("[BulkWorker] Failed to cancel consumer %s: %v", tag, err)
+			} else {
+				logrus.Infof("[BulkWorker] Cancelled consumer: %s", tag)
+			}
+		}
+	}
+}
+
+// Phase 3: Close the channel completely
+func (w *BulkWorker) closeChannel() {
 	if w.ch != nil {
 		_ = w.ch.Close()
 	}
@@ -93,23 +111,55 @@ func (w *BulkWorker) stop() {
 
 func (w *BulkWorker) consume(id int) {
 	tag := fmt.Sprintf("bulk-worker-%d", id)
-	deliveries, err := w.ch.Consume(
-		publisher.QueueBulk, tag, false, false, false, false, nil,
-	)
-	if err != nil {
-		logrus.Errorf("[BulkWorker-%d] Start consume: %v", id, err)
-		return
-	}
 
+	// FIX: Outer loop to handle auto-reconnection
 	for {
-		select {
-		case <-w.ctx.Done():
-			return
-		case d, ok := <-deliveries:
-			if !ok {
-				return
+		// 1. Ensure we have a valid, open channel
+		if w.ch == nil || w.ch.IsClosed() {
+			newCh, err := w.RMQManager.Conn.Channel()
+			if err != nil {
+				logrus.Errorf("[BulkWorker-%d] Failed to recreate channel: %v. Retrying...", id, err)
+				time.Sleep(2 * time.Second)
+				continue
 			}
-			w.handle(id, d)
+
+			// Re-apply QoS on the new channel
+			_ = newCh.Qos(1, 0, false)
+			w.ch = newCh
+		}
+
+		// 2. Start Consuming
+		deliveries, err := w.ch.Consume(
+			publisher.QueueBulk, tag, false, false, false, false, nil,
+		)
+		if err != nil {
+			logrus.Errorf("[BulkWorker-%d] Start consume failed: %v", id, err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		logrus.Infof("[BulkWorker-%d] Listening", id)
+
+		// 3. Inner process loop
+	processLoop:
+		for {
+			select {
+			case <-w.ctx.Done():
+				return // App is shutting down
+
+			case d, ok := <-deliveries:
+				if !ok {
+					// Channel closed! Break out of the inner loop
+					logrus.Warnf("[BulkWorker-%d] Channel closed! Waiting for reconnect...", id)
+					w.ch = nil // Force recreation on next tick
+
+					// Wait for the RMQManager to signal the connection is back
+					<-w.RMQManager.Reconnect
+					break processLoop
+				}
+
+				w.handle(id, d)
+			}
 		}
 	}
 }
@@ -260,7 +310,7 @@ func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, phoneID uint64, msisdn, 
 	row := map[string]interface{}{
 		"client_id":   env.ClientID,
 		"campaign_id": campaignID,
-		"phone_id":    phoneID, // <-- Insert the database ID here
+		"phone_id":    phoneID,
 		"msisdn":      msisdn,
 		"sender_id":   env.SenderID,
 		"message":     message,

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"sdp/connections"
 	"sdp/controllers/dispatcher"
 	"sdp/controllers/mno_router"
 	"sdp/controllers/publisher"
@@ -12,7 +13,6 @@ import (
 
 	"sync"
 
-	amqplib "github.com/rabbitmq/amqp091-go"
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
@@ -21,7 +21,7 @@ import (
 // Collecting them into a struct keeps New's signature short and makes it
 // easy to add a new dependency later without touching every call site.
 type Deps struct {
-	Conn       *amqplib.Connection
+	RMQManager *connections.RMQManager
 	Publisher  *publisher.Publisher
 	Router     *mno_router.Router
 	Limiter    *ratelimiter.Limiter
@@ -59,17 +59,17 @@ type Worker struct {
 // bundle plus ctx/cfg. Called once by SDP.New.
 func New(ctx context.Context, cfg *data.AppConfig, deps Deps) (*Worker, error) {
 
-	bulk, err := newBulkWorker(ctx, deps.Conn, deps.Publisher, deps.Router, deps.CostEngine, deps.DB, deps.S3, cfg.WorkerPoolBulk, cfg.S3Bucket)
+	bulk, err := newBulkWorker(ctx, deps.RMQManager, deps.Publisher, deps.Router, deps.CostEngine, deps.DB, deps.S3, cfg.WorkerPoolBulk, cfg.S3Bucket)
 	if err != nil {
 		return nil, err
 	}
 
-	vip, err := newDispatchWorker(ctx, deps.Conn, publisher.QueueVIP, deps, cfg.WorkerPoolVIP)
+	vip, err := newDispatchWorker(ctx, deps.RMQManager, publisher.QueueVIP, deps, cfg.WorkerPoolVIP)
 	if err != nil {
 		return nil, err
 	}
 
-	standard, err := newDispatchWorker(ctx, deps.Conn, publisher.QueueStandard, deps, cfg.WorkerPoolStandard)
+	standard, err := newDispatchWorker(ctx, deps.RMQManager, publisher.QueueStandard, deps, cfg.WorkerPoolStandard)
 	if err != nil {
 		return nil, err
 	}
@@ -100,9 +100,17 @@ func (w *Worker) Start(ctx context.Context) {
 // Stop closes every sub-pool's AMQP channel and waits for in-flight
 // deliveries to be ACK'd or NACK'd before returning.
 func (w *Worker) Stop() {
-	w.bulk.stop()
-	w.vip.stop()
-	w.standard.stop()
+	// 1. Cancel all consumers (stops new messages)
+	w.bulk.cancelConsumer()
+	w.vip.cancelConsumer()
+	w.standard.cancelConsumer()
+
+	// 2. Wait for active workers to finish processing and ACK
 	w.wg.Wait()
 	logrus.Info("[Worker] All goroutines drained ✅")
+
+	// 3. Safe to close channels now
+	w.bulk.closeChannel()
+	w.vip.closeChannel()
+	w.standard.closeChannel()
 }

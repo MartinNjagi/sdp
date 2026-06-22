@@ -3,11 +3,12 @@ package routers
 import (
 	"context"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"net/http"
+	"sdp/connections"
 	"sdp/controllers"
 	"sdp/controllers/dlr"
 	"sdp/data"
 
-	amqplib "github.com/rabbitmq/amqp091-go"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 
@@ -37,8 +38,9 @@ func (a *App) Initialize(
 	cfg *data.AppConfig,
 	db *gorm.DB,
 	rdc *redis.Client,
-	amqp *amqplib.Connection,
+	RMQManager *connections.RMQManager,
 	s3Client *s3.Client,
+	client *http.Client,
 ) {
 	a.cfg = cfg
 	a.db = db
@@ -47,7 +49,7 @@ func (a *App) Initialize(
 	// --- SDP ----------------------------------------------------------------
 	// Pass only the primitives the SDP needs. It builds its own subcomponents
 	// internally — the App doesn't need to know about workers or dispatchers.
-	sdp, err := controllers.New(ctx, cfg, db, rdc, amqp, s3Client)
+	sdp, err := controllers.New(ctx, cfg, db, rdc, RMQManager, s3Client, client)
 	if err != nil {
 		logrus.Fatalf("Failed to initialise SDP: %v", err)
 	}

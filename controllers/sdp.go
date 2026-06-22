@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"net/http"
+	"sdp/connections"
 	"sdp/controllers/dispatcher"
 	"sdp/controllers/dlr"
 	"sdp/controllers/mno_router"
@@ -13,8 +15,8 @@ import (
 	"sdp/controllers/wallet"
 	"sdp/controllers/worker"
 	"sdp/data"
+	"time"
 
-	amqplib "github.com/rabbitmq/amqp091-go"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
@@ -42,13 +44,14 @@ func New(
 	cfg *data.AppConfig,
 	db *gorm.DB,
 	rdc *redis.Client,
-	conn *amqplib.Connection,
+	rmq *connections.RMQManager,
 	rawStorageClient *s3.Client,
+	client *http.Client,
 ) (*SDP, error) {
 
 	// --- Publisher -----------------------------------------------------
 	// Declares the three-queue topology, exposes typed publish methods.
-	pub, err := publisher.New(conn)
+	pub, err := publisher.New(rmq.Conn)
 	if err != nil {
 		return nil, fmt.Errorf("sdp: publisher: %w", err)
 	}
@@ -57,7 +60,7 @@ func New(
 	// Atomic Redis deductions via preloaded Lua scripts. Falls back to a
 	// live lookup against WALLET_BALANCE_URL when a client has no cached
 	// balance yet (cold Redis, brand-new client).
-	hotWallet, err := wallet.New(rdc, cfg)
+	hotWallet, err := wallet.New(rdc, cfg, client)
 	if err != nil {
 		return nil, fmt.Errorf("sdp: hot wallet: %w", err)
 	}
@@ -68,7 +71,7 @@ func New(
 	if cfg.WalletServiceURL == "" {
 		logrus.Warn("[SDP] WALLET_SERVICE_URL is not set — flush batches will fail")
 	}
-	flusher := wallet.NewFlusher(hotWallet, rdc, cfg.WalletServiceURL, cfg.WalletFlushInterval)
+	flusher := wallet.NewFlusher(hotWallet, rdc, cfg.WalletServiceURL, cfg.WalletFlushInterval, client)
 
 	// --- Dispatcher ---------------------------------------------------------
 	// SafaricomDispatcher needs a token getter closure — reads the cached
@@ -121,7 +124,7 @@ func New(
 	// Every shared collaborator is bundled into a single worker.Deps value
 	// so New's signature stays short even as dependencies grow.
 	deps := worker.Deps{
-		Conn:       conn,
+		RMQManager: rmq,
 		Publisher:  pub,
 		Router:     mnor,
 		Limiter:    rl,
@@ -178,12 +181,25 @@ func (s *SDP) Start() {
 	logrus.Info("[SDP] ✅ All components running")
 }
 
-// Stop performs a graceful drain: workers finish in-flight messages and
-// ACK/NACK them, then the flusher performs one final flush so no pending
-// deductions are lost on restart.
+// Stop performs a graceful drain of the entire SDP component: workers finish
+// in-flight messages and ACK/NACK them, then the flusher performs one final
+// flush so no pending deductions are lost, and finally the publisher is closed.
 func (s *SDP) Stop() {
 	logrus.Warn("[SDP] Shutting down — draining in-flight messages...")
+
+	// 1. Drain workers (this ensures all final deductions hit Redis)
 	s.worker.Stop()
+
+	// 2. Force a final flush so no pending deductions are left behind in Redis
+	logrus.Info("[SDP] Forcing final wallet flush...")
+
+	// Use a 5-second timeout context specifically for this final network call
+	flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.flusher.ForceFlush(flushCtx)
+
+	// 3. Close the publisher connection
 	s.publisher.Close()
+
 	logrus.Info("[SDP] ✅ Clean shutdown complete")
 }

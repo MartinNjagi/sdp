@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sdp/connections"
 	"sdp/controllers/dispatcher"
 	"sdp/controllers/mno_router"
 	"sdp/controllers/publisher"
@@ -28,17 +29,11 @@ const maxRetries = 3
 // DispatchEnvelopes and runs the complete pipeline:
 //
 //	Dequeue → Wallet deduct → Route → Rate-limit → Dispatch → DB update → ACK
-//
-// One DispatchWorker instance is created per queue (VIP, Standard) by
-// worker.go, each bound to a different queue name and given an independent
-// pool size — VIP always gets more consumers than Standard regardless of
-// how deep either queue grows. DispatchWorker never consumes the legacy
-// "sms.outbound.q"; the queue it binds to is passed in explicitly by the
-// caller and is always one of publisher.QueueVIP / publisher.QueueStandard.
 type DispatchWorker struct {
 	ctx        context.Context
 	queueName  string
-	ch         *amqplib.Channel
+	RMQManager *connections.RMQManager // Replaces raw connection
+	ch         *amqplib.Channel        // Restored: Needs to hold the active channel
 	pub        *publisher.Publisher
 	router     *mno_router.Router
 	limiter    *ratelimiter.Limiter
@@ -50,48 +45,47 @@ type DispatchWorker struct {
 	poolSize   int
 }
 
-// newDispatchWorker constructs a DispatchWorker bound to a specific queue,
-// with its own dedicated AMQP channel so a slow consumer on one queue never
-// blocks the other. deps bundles every shared dependency so this signature
-// stays short regardless of how many collaborators DispatchWorker needs.
+// newDispatchWorker constructs a DispatchWorker bound to a specific queue.
 func newDispatchWorker(
 	ctx context.Context,
-	conn *amqplib.Connection,
+	rmqManager *connections.RMQManager, // Updated to take RMQManager
 	queueName string,
 	deps Deps,
 	poolSize int,
 ) (*DispatchWorker, error) {
-	ch, err := conn.Channel()
+
+	// FIX: Use the manager's connection to open the channel
+	ch, err := rmqManager.Conn.Channel()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch worker [%s]: open channel: %w", queueName, err)
 	}
 
-	// Prefetch 50 unacknowledged messages per channel — bounds memory and
-	// prevents one slow MNO from starving the rest of the pool.
+	// Prefetch 50 unacknowledged messages per channel
 	if err := ch.Qos(50, 0, false); err != nil {
 		_ = ch.Close()
 		return nil, fmt.Errorf("dispatch worker [%s]: set QoS: %w", queueName, err)
 	}
 
 	return &DispatchWorker{
-		ctx:       ctx,
-		queueName: queueName,
-		ch:        ch,
-		pub:       deps.Publisher,
-		router:    deps.Router,
-		limiter:   deps.Limiter,
-		disp:      deps.Dispatcher,
-		hotWallet: deps.HotWallet,
-		flusher:   deps.Flusher,
-		db:        deps.DB,
-		poolSize:  poolSize,
+		ctx:        ctx,
+		queueName:  queueName,
+		RMQManager: rmqManager, // Save manager for reconnects
+		ch:         ch,         // Save the active channel
+		pub:        deps.Publisher,
+		router:     deps.Router,
+		limiter:    deps.Limiter,
+		disp:       deps.Dispatcher,
+		hotWallet:  deps.HotWallet,
+		flusher:    deps.Flusher,
+		db:         deps.DB,
+		poolSize:   poolSize,
 	}, nil
 }
 
 // start spawns poolSize consumer goroutines, each registering its own
 // consumer tag so the broker round-robins deliveries across the pool.
 func (w *DispatchWorker) start(wg *sync.WaitGroup) {
-	for i := range w.poolSize {
+	for i := 0; i < w.poolSize; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -101,9 +95,26 @@ func (w *DispatchWorker) start(wg *sync.WaitGroup) {
 	logrus.Infof("[DispatchWorker/%s] Pool of %d goroutines started", w.queueName, w.poolSize)
 }
 
-// stop closes the channel, which cancels all pending deliveries and causes
-// each consume() loop to exit cleanly.
-func (w *DispatchWorker) stop() {
+// Phase 1: Tell RabbitMQ to stop sending new messages to this worker pool
+func (w *DispatchWorker) cancelConsumer() {
+	if w.ch != nil {
+		// Loop through every worker ID in the pool and cancel its specific tag
+		for i := 0; i < w.poolSize; i++ {
+			tag := fmt.Sprintf("dispatch-%s-%d", w.queueName, i)
+
+			// This stops new deliveries for this specific goroutine,
+			// but keeps the channel OPEN so we can still ACK messages we already have.
+			if err := w.ch.Cancel(tag, false); err != nil {
+				logrus.Warnf("[DispatchWorker/%s] Failed to cancel consumer %s: %v", w.queueName, tag, err)
+			} else {
+				logrus.Infof("[DispatchWorker/%s] Cancelled consumer: %s", w.queueName, tag)
+			}
+		}
+	}
+}
+
+// Phase 3: Close the channel completely
+func (w *DispatchWorker) closeChannel() {
 	if w.ch != nil {
 		_ = w.ch.Close()
 	}
@@ -111,38 +122,60 @@ func (w *DispatchWorker) stop() {
 
 func (w *DispatchWorker) consume(id int) {
 	tag := fmt.Sprintf("dispatch-%s-%d", w.queueName, id)
-	deliveries, err := w.ch.Consume(
-		w.queueName, // explicit queue name passed in by the caller — VIP or Standard
-		tag,
-		false, // autoAck=false — we ACK manually after the full pipeline succeeds
-		false, // exclusive
-		false, // noLocal
-		false, // noWait
-		nil,
-	)
-	if err != nil {
-		logrus.Errorf("[DispatchWorker/%s-%d] Start consume: %v", w.queueName, id, err)
-		return
-	}
 
-	logrus.Infof("[DispatchWorker/%s-%d] Listening", w.queueName, id)
-
+	// FIX: Outer loop to handle auto-reconnection
 	for {
-		select {
-		case <-w.ctx.Done():
-			return
-		case d, ok := <-deliveries:
-			if !ok {
-				// Channel closed — broker disconnected or stop() was called.
-				return
+		// 1. Ensure we have a valid, open channel
+		if w.ch == nil || w.ch.IsClosed() {
+			newCh, err := w.RMQManager.Conn.Channel()
+			if err != nil {
+				logrus.Errorf("[DispatchWorker/%s-%d] Failed to recreate channel: %v. Retrying...", w.queueName, id, err)
+				time.Sleep(2 * time.Second)
+				continue
 			}
-			w.handle(id, d)
+
+			// Re-apply QoS on the new channel
+			_ = newCh.Qos(50, 0, false)
+			w.ch = newCh
+		}
+
+		// 2. Start Consuming
+		deliveries, err := w.ch.Consume(
+			w.queueName, tag, false, false, false, false, nil,
+		)
+		if err != nil {
+			logrus.Errorf("[DispatchWorker/%s-%d] Consume failed: %v", w.queueName, id, err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		logrus.Infof("[DispatchWorker/%s-%d] Listening", w.queueName, id)
+
+		// 3. Inner process loop
+	processLoop:
+		for {
+			select {
+			case <-w.ctx.Done():
+				return // App is shutting down
+
+			case d, ok := <-deliveries:
+				if !ok {
+					// Channel closed! Break out of the inner loop
+					logrus.Warnf("[DispatchWorker/%s-%d] Channel closed! Waiting for reconnect...", w.queueName, id)
+					w.ch = nil // Force recreation on next tick
+
+					// Wait for the RMQManager to signal the connection is back
+					<-w.RMQManager.Reconnect
+					break processLoop
+				}
+
+				w.handle(id, d)
+			}
 		}
 	}
 }
 
-// handle runs the full dispatch pipeline for one DispatchEnvelope:
-// decode → wallet deduct → route → rate-limit → dispatch → DB update → ACK.
+// handle runs the full dispatch pipeline for one DispatchEnvelope.
 func (w *DispatchWorker) handle(workerID int, d amqplib.Delivery) {
 	log := logrus.WithFields(logrus.Fields{
 		"queue":  w.queueName,
@@ -164,8 +197,9 @@ func (w *DispatchWorker) handle(workerID int, d amqplib.Delivery) {
 	})
 
 	// 2. Hot wallet deduction — atomic, before any network call.
-	// env.Cost is in integer message credits, not currency.
-	if env.Cost > 0 {
+	// FIX: Only deduct if this is the FIRST attempt (RetryCount == 0).
+	// If it's > 0, we already deducted the money on a previous attempt!
+	if env.Cost > 0 && env.RetryCount == 0 {
 		result, err := w.hotWallet.Deduct(w.ctx, data.DeductCreditRequest{
 			ClientID: env.ClientID,
 			Amount:   env.Cost,
@@ -237,8 +271,7 @@ func (w *DispatchWorker) handle(workerID int, d amqplib.Delivery) {
 
 // handleDispatchError classifies the error via dispatcher.SendError and
 // either republishes with backoff (temporary, retries remaining) or
-// dead-letters permanently — refunding the wallet in the latter case since
-// the deduction already happened in step 2 of handle().
+// dead-letters permanently.
 func (w *DispatchWorker) handleDispatchError(
 	log *logrus.Entry,
 	d amqplib.Delivery,
@@ -299,10 +332,6 @@ func (w *DispatchWorker) markFailed(outboxID uint64, reason string) {
 // Wallet refund helper
 // --------------------------------------------------------------------------
 
-// refund credits the client back when a deduction already happened but the
-// message ultimately could not be sent. amount is in integer credits;
-// HotWallet.Refund's signature is float64 to match the dlr.WalletRefunder
-// interface, so the cast happens once, here, at the boundary.
 func (w *DispatchWorker) refund(clientID string, amount int64, reason string) {
 	if amount <= 0 || clientID == "" {
 		return

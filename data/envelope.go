@@ -60,16 +60,19 @@ type DLREvent struct {
 	OccurredAt string  `json:"occurred_at"` // RFC3339
 }
 
-// WalletFlushPayload is the body sent to the Core Wallet Service during the
+// WalletFlushEntry is the body sent to the Core Wallet Service during the
 // batch flush. One entry per client that had deductions in the flush window.
-type WalletFlushPayload struct {
-	Entries []WalletFlushEntry `json:"entries"`
-}
-
 type WalletFlushEntry struct {
+	FlushID      string `json:"flush_id"` // Generated exactly once per batch
 	ClientID     string `json:"client_id"`
 	Amount       int64  `json:"amount"` // Total deducted in the flush window (KES)
 	MessageCount int    `json:"message_count"`
+}
+
+type DeductCreditPayload struct {
+	ClientID   uint   `json:"client_id"`
+	Amount     uint   `json:"amount"`
+	CampaignID string `json:"campaign_id"`
 }
 
 // DeductCreditRequest is the per-message deduction request passed from the

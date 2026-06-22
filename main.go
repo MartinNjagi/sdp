@@ -35,8 +35,10 @@ import (
 
 func main() {
 
-	// ----- 1. Context -------------------------------------------------------
-	ctx, cancel := context.WithCancel(context.Background())
+	// ----- 1. Context & Signal Handling -------------------------------------
+	// Replace manual 'quit' channel with NotifyContext. This automatically
+	// cancels the context if the app receives SIGINT (Ctrl+C) or SIGTERM (Docker stop).
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	// ----- 2. Config & Logger -----------------------------------------------
@@ -55,19 +57,17 @@ func main() {
 	db := connections.InitDB(cfg)
 	rdc := connections.InitRedis(cfg)
 	amqp := connections.InitRMQ(cfg)
+	httpClient := connections.NewHTTP(cfg.InternalServiceToken, 10*time.Second)
 	s3Client, err := connections.InitStorageClient(ctx, cfg)
 	if err != nil {
 		logrus.Fatalf("Failed to initialize MinIO Client: %v", err)
 	}
-	// ----- 4. Application container -----------------------------------------
-	// Initialize wires all services together and constructs the SDP internally.
-	// SDP.Start() is intentionally deferred until AFTER the HTTP server is
-	// running — the DLR webhook routes must be live before workers begin
-	// consuming to prevent DLRs arriving at a 404 endpoint.
-	var app routers.App
-	app.Initialize(ctx, cfg, db, rdc, amqp, s3Client)
 
-	//Init token Refresh
+	// ----- 4. Application container -----------------------------------------
+	var app routers.App
+	app.Initialize(ctx, cfg, db, rdc, amqp, s3Client, httpClient)
+
+	// Init token Refresh
 	var conn connections.SDP
 	conn.InitSDPToken(ctx, rdc, cfg)
 
@@ -82,41 +82,40 @@ func main() {
 		Handler: r,
 	}
 
+	// HTTP Fail Mechanism
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logrus.Fatalf("listen: %s\n", err)
+			logrus.Errorf("HTTP server crashed: %v", err)
+			cancel() // Trigger global shutdown
 		}
 	}()
 
 	// ----- 6. Start SDP worker pool -----------------------------------------
-	// Workers start consuming from RabbitMQ only after the HTTP server is up.
-	app.SDP.Start()
+	// Worker Fail Mechanism: Run in a goroutine to prevent the hangup!
+	go func() {
+		logrus.Info("Starting SDP worker pool...")
+		app.SDP.Start() // Calling your current start method
+
+	}()
 
 	// ----- 7. Wait for shutdown signal --------------------------------------
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	// This blocks the main thread cleanly until an OS signal arrives OR
+	// one of the cancel() functions above is triggered.
+	<-ctx.Done()
 
-	logrus.Warn("Shutting down server...")
+	logrus.Warn("Shutdown signal received. Shutting down server gracefully...")
 
 	// ----- 8. Graceful shutdown ---------------------------------------------
-	// Order matters:
-	//   a. Stop accepting new HTTP requests.
-	//   b. Drain the SDP worker pool (ACK in-flight messages).
-	//   c. Cancel the background context (crons, SSE loops, etc.).
-
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 
+	// a. Stop accepting new HTTP requests.
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logrus.Fatal("Server forced to shutdown: ", err)
+		logrus.Errorf("Server forced to shutdown: %v", err)
 	}
 
-	// Drain workers — give them up to 30 s to finish in-flight dispatches.
+	// b. Drain the SDP worker pool (ACK in-flight messages).
 	app.SDP.Stop()
-
-	// Signal all remaining background goroutines to exit.
-	cancel()
 
 	logrus.Info("Server stopped cleanly ✅")
 }

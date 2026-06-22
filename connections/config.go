@@ -61,7 +61,8 @@ func InitConfig() *data.AppConfig {
 		SMPPPassword: getEnv("SMPP_PASSWORD", ""),
 		SMPPMode:     getEnv("SMPP_MODE", "transceiver"),
 
-		JWTSecret: mustEnv("JWT_SECRET"),
+		JWTSecret:            mustEnv("JWT_SECRET"),
+		InternalServiceToken: mustEnv("INTERNAL_SERVICE_TOKEN"),
 
 		AWSRegion:          getEnv("AWS_REGION", ""),
 		AWSAccessKeyID:     getEnv("AWS_ACCESS_KEY_ID", ""),
