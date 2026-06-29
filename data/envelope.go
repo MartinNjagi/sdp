@@ -107,7 +107,7 @@ type BalanceCreditRequest struct {
 // an integer credit/token counter (1 credit ≈ 1 message unit) — never a
 // currency amount with decimals.
 type WalletBalanceResponse struct {
-	ClientID string `json:"client_id"`
+	ClientID int64  `json:"client_id"`
 	Balance  int64  `json:"balance"`
 	Currency string `json:"currency"`
 }

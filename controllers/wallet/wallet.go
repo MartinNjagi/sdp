@@ -81,7 +81,7 @@ func New(rdc *redis.Client, cfg *data.AppConfig, client *http.Client) (*HotWalle
 // it automatically pauses, fetches the live balance from the Core Wallet
 // Service, seeds Redis, and retries the deduction.
 func (w *HotWallet) Deduct(ctx context.Context, req data.DeductCreditRequest) (*data.DeductCreditResult, error) {
-	clientIDStr := fmt.Sprintf("%d", req.ClientID)
+	clientIDStr := fmt.Sprintf("%v", req.ClientID)
 	keys := []string{
 		fmt.Sprintf(keyBalance, clientIDStr),
 		fmt.Sprintf(keyPending, clientIDStr),
@@ -241,12 +241,21 @@ func (w *HotWallet) queryBalance(ctx context.Context, clientID string) (*data.Wa
 		return nil, fmt.Errorf("hot wallet: balance endpoint returned %d for client=%s", resp.StatusCode, clientID)
 	}
 
-	var out data.WalletBalanceResponse
-	if err := decodeJSON(resp.Body, &out); err != nil {
+	// Define the expected APIResponse envelope
+	var envelope struct {
+		Status  int                        `json:"status"`
+		Message string                     `json:"message"`
+		Data    data.WalletBalanceResponse `json:"data"`
+	}
+
+	if err := decodeJSON(resp.Body, &envelope); err != nil {
 		return nil, fmt.Errorf("hot wallet: decode balance response client=%s: %w", clientID, err)
 	}
 
-	return &out, nil
+	logrus.Infof("[HotWallet] Successfully seeded cache: client=%s balance=%d", clientID, envelope.Data.Balance)
+
+	// Return the actual nested data
+	return &envelope.Data, nil
 }
 
 // flushAccumulator atomically reads and resets the pending deduction for a
