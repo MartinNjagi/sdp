@@ -38,12 +38,16 @@ const (
 // Additional service dependencies (wallet, SSE, webhook) are injected via
 // setter methods so the struct can be constructed without them for unit tests.
 type Reconciler struct {
-	db *gorm.DB
+	db                *gorm.DB
+	hotWalletRefunder WalletRefunder // Restores Redis balance
+	ledgerRefunder    LedgerRefunder // Updates DB via HTTP (NEW)
+	sseNotifier       SSENotifier
+	webhookFirer      WebhookFirer
+}
 
-	// Optional downstream hooks — nil-safe, skipped if not set.
-	walletRefunder WalletRefunder
-	sseNotifier    SSENotifier
-	webhookFirer   WebhookFirer
+// Add the interface for the new LedgerRefunder
+type LedgerRefunder interface {
+	Refund(ctx context.Context, clientID string, amount float64, outboxID uint64) error
 }
 
 // WalletRefunder is satisfied by your existing Wallet service.
@@ -70,7 +74,7 @@ func NewReconciler(db *gorm.DB) *Reconciler {
 
 // WithWalletRefunder attaches the wallet service. Returns self for chaining.
 func (r *Reconciler) WithWalletRefunder(w WalletRefunder) *Reconciler {
-	r.walletRefunder = w
+	r.hotWalletRefunder = w
 	return r
 }
 
@@ -83,6 +87,12 @@ func (r *Reconciler) WithSSENotifier(s SSENotifier) *Reconciler {
 // WithWebhookFirer attaches the client webhook service. Returns self for chaining.
 func (r *Reconciler) WithWebhookFirer(f WebhookFirer) *Reconciler {
 	r.webhookFirer = f
+	return r
+}
+
+// WithLedgerRefunder Add the setter
+func (r *Reconciler) WithLedgerRefunder(l LedgerRefunder) *Reconciler {
+	r.ledgerRefunder = l
 	return r
 }
 
@@ -154,13 +164,23 @@ func (r *Reconciler) dispatchEffects(
 	record outboxRecord,
 	status string,
 ) {
-	// Wallet refund — only on FAILED, and only if the service is wired in.
-	if status == StatusFailed && r.walletRefunder != nil {
-		if err := r.walletRefunder.Refund(ctx, record.ClientID, record.Cost, "DLR_FAILED"); err != nil {
-			log.Errorf("Wallet refund failed for client=%s amount=%.4f: %v",
-				record.ClientID, record.Cost, err)
-		} else {
-			log.Infof("Refunded %.4f to client=%s", record.Cost, record.ClientID)
+	// Wallet refund — only on FAILED
+	if status == StatusFailed {
+		// 1. Hot Refund (Instant Redis credits back)
+		if r.hotWalletRefunder != nil {
+			err := r.hotWalletRefunder.Refund(ctx, record.ClientID, record.Cost, "DLR_FAILED")
+			if err != nil {
+				log.Errorf("dlr reconciler: hotWalletRefunder: failed to refund: %w", err)
+			}
+		}
+
+		// 2. Cold Refund (HTTP to Wallet Service)
+		if r.ledgerRefunder != nil {
+			if err := r.ledgerRefunder.Refund(ctx, record.ClientID, record.Cost, record.ID); err != nil {
+				log.Errorf("HTTP Ledger refund failed for client=%s amount=%.4f: %v", record.ClientID, record.Cost, err)
+			} else {
+				log.Infof("Ledger successfully refunded %.4f to client=%s", record.Cost, record.ClientID)
+			}
 		}
 	}
 

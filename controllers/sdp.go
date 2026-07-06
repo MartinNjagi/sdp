@@ -109,8 +109,20 @@ func New(
 	// already subscribes to this channel and routes events to connected
 	// WebSocket/SSE clients, so no further plumbing is needed here.
 	sseNotifier := dlr.NewRedisSSENotifier(rdc, cfg.SSEChannel)
+	// Create the new HTTP Ledger Refunder
+	// Note: We strip any trailing paths from the config URL just to be safe,
+	// or assume cfg.WalletServiceURL is just the base host.
+	baseURL := "http://" + cfg.ServerHost + ":4849" // Assuming Wallet is on 4849
+	if cfg.WalletServiceURL != "" {
+		baseURL = cfg.WalletServiceURL // Make sure this is just the host in .env, e.g., http://localhost:4849
+	}
+
+	ledgerRefunder := wallet.NewLedgerRefunder(baseURL, client)
+
+	// Attach both to the Reconciler
 	rec := dlr.NewReconciler(db).
 		WithWalletRefunder(hotWallet).
+		WithLedgerRefunder(ledgerRefunder). // <-- NEW
 		WithSSENotifier(sseNotifier)
 	// WebhookFirer (client-configured outbound webhooks) is attached by
 	// App.Initialize once that service exists — see router/app.go.
@@ -126,6 +138,7 @@ func New(
 	deps := worker.Deps{
 		RMQManager: rmq,
 		Publisher:  pub,
+		RDC:        rdc,
 		Router:     mnor,
 		Limiter:    rl,
 		Dispatcher: disp,

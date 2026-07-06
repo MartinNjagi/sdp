@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"github.com/redis/go-redis/v9"
 	"sdp/connections"
 	"sdp/controllers/dispatcher"
 	"sdp/controllers/mno_router"
@@ -23,6 +24,7 @@ import (
 type Deps struct {
 	RMQManager *connections.RMQManager
 	Publisher  *publisher.Publisher
+	RDC        *redis.Client
 	Router     *mno_router.Router
 	Limiter    *ratelimiter.Limiter
 	Dispatcher dispatcher.Dispatcher
@@ -59,7 +61,7 @@ type Worker struct {
 // bundle plus ctx/cfg. Called once by SDP.New.
 func New(ctx context.Context, cfg *data.AppConfig, deps Deps) (*Worker, error) {
 
-	bulk, err := newBulkWorker(ctx, deps.RMQManager, deps.Publisher, deps.Router, deps.CostEngine, deps.DB, deps.S3, cfg.WorkerPoolBulk, cfg.S3Bucket)
+	bulk, err := newBulkWorker(ctx, deps.RMQManager, deps.Publisher, deps.RDC, deps.Router, deps.CostEngine, deps.DB, deps.S3, cfg.WorkerPoolBulk, cfg.S3Bucket)
 	if err != nil {
 		return nil, err
 	}

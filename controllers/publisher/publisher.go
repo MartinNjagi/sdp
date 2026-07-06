@@ -123,7 +123,9 @@ func routingKeyForType(messageType string) string {
 	case "vip":
 		return RoutingKeyVIP
 	case "bulk":
-		return RoutingKeyBulk
+		// FIX: Bulk DispatchEnvelopes must go to the Standard DispatchWorker queue,
+		// NOT the Bulk fan-out queue.
+		return RoutingKeyStandard
 	default:
 		return RoutingKeyStandard
 	}

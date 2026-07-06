@@ -135,25 +135,16 @@ func (w *HotWallet) Deduct(ctx context.Context, req data.DeductCreditRequest) (*
 	}, nil
 }
 
-// Refund atomically credits an amount back to the hot balance and
-// decrements the accumulator. Called by the DLR reconciler on FAILED
-// delivery when RefundOnFailedDelivery is enabled. Satisfies the
-// dlr.WalletRefunder interface (amount is float64 there for currency-style
-// callers; converted to int64 credits here).
 func (w *HotWallet) Refund(ctx context.Context, clientID string, amount float64, _ string) error {
 	credits := int64(amount)
-	keys := []string{
-		fmt.Sprintf(keyBalance, clientID),
-		fmt.Sprintf(keyPending, clientID),
-		fmt.Sprintf(keyCount, clientID),
-	}
+	keys := []string{fmt.Sprintf(keyBalance, clientID)} // Only need the balance key now
 
 	_, err := w.evalWithReload(ctx, &w.shaRefund, luaRefund, keys, strconv.FormatInt(credits, 10))
 	if err != nil {
 		return fmt.Errorf("hot wallet: refund client=%s amount=%d: %w", clientID, credits, err)
 	}
 
-	logrus.Debugf("[HotWallet] Refunded %d credits to client=%s", credits, clientID)
+	logrus.Debugf("[HotWallet] Restored %d credits to client=%s", credits, clientID)
 	return nil
 }
 

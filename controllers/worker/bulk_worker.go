@@ -5,7 +5,10 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm/clause"
 	"io"
+	"regexp"
 	"sdp/connections"
 	"sdp/controllers/mno_router"
 	"sdp/controllers/publisher"
@@ -27,6 +30,7 @@ type BulkWorker struct {
 	RMQManager *connections.RMQManager // Replaces raw amqplib.Connection
 	ch         *amqplib.Channel
 	pub        *publisher.Publisher
+	rdc        *redis.Client
 	router     *mno_router.Router
 	costEngine *data.CostEngine
 	db         *gorm.DB
@@ -40,6 +44,7 @@ func newBulkWorker(
 	ctx context.Context,
 	rmqManager *connections.RMQManager, // Injected Manager
 	pub *publisher.Publisher,
+	redisClient *redis.Client,
 	router *mno_router.Router,
 	costEngine *data.CostEngine,
 	db *gorm.DB,
@@ -64,6 +69,7 @@ func newBulkWorker(
 		RMQManager: rmqManager, // Save manager to struct for reconnects
 		ch:         ch,
 		pub:        pub,
+		rdc:        redisClient,
 		router:     router,
 		costEngine: costEngine,
 		db:         db,
@@ -179,69 +185,81 @@ func (w *BulkWorker) handle(workerID int, d amqplib.Delivery) {
 		"client_id":   env.ClientID,
 	})
 
+	// 1. Read the current Cursor from Redis
+	cursorKey := fmt.Sprintf("bulk:cursor:%d", env.CampaignID)
+	cursorStr, _ := w.rdc.Get(w.ctx, cursorKey).Result()
+	cursor, _ := strconv.Atoi(cursorStr)
+
+	// 2. Fetch contact list
 	var contacts []Contact
 	var fetchErr error
-
 	ContactGroupID, _ := strconv.Atoi(env.ContactGroupID)
 
-	// 1. Fetch contact list based on available configuration
 	if env.FileURL != "" {
-		log.Infof("Fetching contacts from FileURL=%s", env.FileURL)
 		contacts, fetchErr = w.fetchContactsFromFile(env.FileURL)
 	} else if ContactGroupID > 0 {
-		log.Infof("Fetching contacts from DB ContactGroupID=%d", ContactGroupID)
 		contacts, fetchErr = w.fetchContactsFromDB(uint64(ContactGroupID))
 	} else {
-		log.Error("Neither file_url nor contact_group_id provided in envelope")
-		_ = d.Nack(false, false) // Dead-letter permanently
+		log.Error("Neither file_url nor contact_group_id provided")
+		_ = d.Nack(false, false)
 		return
 	}
 
 	if fetchErr != nil {
 		log.Errorf("Fetch contacts failed: %v", fetchErr)
-		_ = d.Nack(false, true) // Requeue — DB or Storage might be temporarily down
+		_ = d.Nack(false, true)
 		return
 	}
 
-	log.Infof("Fetched %d contacts for campaign_id=%d", len(contacts), env.CampaignID)
+	// Safety check: if cursor is past EOF, we are already done.
+	if cursor >= len(contacts) {
+		w.rdc.Del(w.ctx, cursorKey)
+		_ = d.Ack(false)
+		return
+	}
 
-	// ---Pre-fetch the Template ---
+	// 3. Define the Chunk (Process 5,000 records at a time)
+	chunkSize := 5000
+	end := cursor + chunkSize
+	if end > len(contacts) {
+		end = len(contacts)
+	}
+	chunk := contacts[cursor:end]
+
+	log.Infof("Processing chunk %d to %d (out of %d) for campaign_id=%d", cursor, end, len(contacts), env.CampaignID)
+
+	// 4. Pre-fetch the Template
 	var templateBody string
-
-	// Assuming env.TemplateID is the primary key of your templates table
 	if err := w.db.Table("templates").
-		Select("content"). // Just grab the string content you need
+		Select("content").
 		Where("id = ? or name = ?", env.TemplateID, env.TemplateID).
-		Scan(&templateBody).Error; err != nil {
-
-		log.Errorf("Failed to fetch template id=%v: %v", env.TemplateID, err)
-		_ = d.Nack(false, false) // Dead-letter, cannot proceed without template
-		return
-	}
-
-	if templateBody == "" {
-		log.Errorf("Template id=%v is empty", env.TemplateID)
+		Scan(&templateBody).Error; err != nil || templateBody == "" {
+		log.Errorf("Failed to fetch/empty template id=%v: %v", env.TemplateID, err)
 		_ = d.Nack(false, false)
 		return
 	}
 
-	// 2. Fan-out: compile + write Outbox + publish per contact.
+	// 5. Fan-out this chunk
 	failed := 0
-	for _, contact := range contacts {
+	for _, contact := range chunk {
 		if err := w.processContact(env, templateBody, contact); err != nil {
 			log.Errorf("processContact msisdn=%s: %v", contact.MSISDN, err)
 			failed++
-			// Continue — partial failure is acceptable for bulk campaigns.
 		}
 	}
 
-	if failed > 0 {
-		log.Warnf("campaign_id=%d completed with %d/%d failures", env.CampaignID, failed, len(contacts))
+	// 6. Yield or Finish
+	if end >= len(contacts) {
+		// Campaign is 100% complete
+		w.rdc.Del(w.ctx, cursorKey)
+		_ = d.Ack(false)
+		log.Infof("campaign_id=%d fan-out COMPLETE", env.CampaignID)
+	} else {
+		// Update cursor and REQUEUE so RabbitMQ can interleave a different campaign
+		w.rdc.Set(w.ctx, cursorKey, end, 24*time.Hour)
+		_ = d.Nack(false, true) // requeue=true tosses it back in the queue
+		log.Infof("campaign_id=%d chunk complete. Requeuing for fairness.", env.CampaignID)
 	}
-
-	_ = d.Ack(false)
-	log.Infof("campaign_id=%d fan-out complete: %d dispatched, %d failed",
-		env.CampaignID, len(contacts)-failed, failed)
 }
 
 // Local struct mapping just for the FirstOrCreate check
@@ -302,7 +320,7 @@ func (w *BulkWorker) processContact(env data.BulkEnvelope, templateBody string, 
 }
 
 // --------------------------------------------------------------------------
-// Outbox write
+// Outbox write (UPDATED FOR IDEMPOTENCY)
 // --------------------------------------------------------------------------
 
 func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, phoneID uint64, msisdn, message string, cost int64) (uint64, error) {
@@ -320,7 +338,12 @@ func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, phoneID uint64, msisdn, 
 		"updated_at":  time.Now(),
 	}
 
-	result := w.db.Table("outboxes").Create(row)
+	// Use ON CONFLICT DO NOTHING (translates to INSERT IGNORE in MySQL)
+	// If a worker crashes mid-chunk and replays from the last cursor, this prevents duplicate sends.
+	result := w.db.Table("outboxes").
+		Clauses(clause.OnConflict{DoNothing: true}).
+		Create(row)
+
 	if result.Error != nil {
 		return 0, result.Error
 	}
@@ -469,34 +492,33 @@ func (w *BulkWorker) fetchContactsFromFile(fileKey string) ([]Contact, error) {
 // Template compilation
 // --------------------------------------------------------------------------
 
+var templateRegex = regexp.MustCompile(`\{\{\s*([^}]+?)\s*\}\}|\{\s*([^}]+?)\s*\}|\[\s*([^\]]+?)\s*\]`)
+
 // compileTemplate performs substitution on the template body.
 // Supports {{key}}, {key}, and [key] formats, ignoring spaces and case.
 func compileTemplate(template string, replacements map[string]string) string {
-	result := template
-
-	for key, value := range replacements {
-		// Because replacements map keys are forced to lowercase during extraction,
-		// we generate an uppercase version to match tags like [CODE] or {NAME}.
-		upperKey := strings.ToUpper(key)
-
-		// 1. Double curly braces: {{name}} or {{NAME}}
-		result = strings.ReplaceAll(result, "{{"+key+"}}", value)
-		result = strings.ReplaceAll(result, "{{"+upperKey+"}}", value)
-		result = strings.ReplaceAll(result, "{{ "+key+" }}", value)
-		result = strings.ReplaceAll(result, "{{ "+upperKey+" }}", value)
-
-		// 2. Single curly braces: {name} or {NAME}
-		result = strings.ReplaceAll(result, "{"+key+"}", value)
-		result = strings.ReplaceAll(result, "{"+upperKey+"}", value)
-		result = strings.ReplaceAll(result, "{ "+key+" }", value)
-		result = strings.ReplaceAll(result, "{ "+upperKey+" }", value)
-
-		// 3. Square brackets: [code] or [CODE]
-		result = strings.ReplaceAll(result, "["+key+"]", value)
-		result = strings.ReplaceAll(result, "["+upperKey+"]", value)
-		result = strings.ReplaceAll(result, "[ "+key+" ]", value)
-		result = strings.ReplaceAll(result, "[ "+upperKey+" ]", value)
+	normalized := make(map[string]string, len(replacements))
+	for k, v := range replacements {
+		normalized[strings.ToLower(strings.TrimSpace(k))] = v
 	}
 
-	return result
+	return templateRegex.ReplaceAllStringFunc(template, func(match string) string {
+		submatches := templateRegex.FindStringSubmatch(match)
+		var key string
+
+		for i := 1; i <= 3; i++ {
+			if submatches[i] != "" {
+				key = submatches[i]
+				break
+			}
+		}
+
+		key = strings.ToLower(strings.TrimSpace(key))
+
+		if val, ok := normalized[key]; ok {
+			return val
+		}
+
+		return "" // Strip dangling placeholders
+	})
 }

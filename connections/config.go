@@ -34,7 +34,7 @@ func InitConfig() *data.AppConfig {
 		DBPassword: mustEnv("DB_PASSWORD"),
 		DBSSLMode:  getEnv("DB_SSL_MODE", "disable"),
 
-		RedisAddr:     getEnv("REDIS_ADDR", "localhost:6379"),
+		RedisAddr:     getEnv("REDIS_ADDR", "localhost:6381"),
 		RedisHost:     getEnv("REDIS_HOST", "localhost"),
 		RedisPort:     getEnv("REDIS_PORT", "6379"),
 		RedisPassword: getEnv("REDIS_PASSWORD", ""),

@@ -39,14 +39,11 @@ redis.call('INCR', KEYS[3])
 return {1, tostring(new_balance)}
 `
 
-// luaRefund atomically adds credits back to the hot balance and decrements
-// the accumulator. Called by the DLR reconciler on FAILED delivery when
-// RefundOnFailedDelivery is enabled.
+// luaRefund atomically adds credits back to the hot balance.
+// It NO LONGER touches the accumulator. The official ledger refund is handled via HTTP.
 //
 // KEYS[1] = wallet:{client_id}:balance
-// KEYS[2] = wallet:{client_id}:pending_deduction
-// KEYS[3] = wallet:{client_id}:pending_count
-// ARGV[1] = refund amount (integer credits, string representation)
+// ARGV[1] = refund amount (integer credits)
 const luaRefund = `
 local amount = tonumber(ARGV[1])
 local current = tonumber(redis.call('GET', KEYS[1]))
@@ -54,15 +51,6 @@ if current == nil then current = 0 end
 
 local new_balance = current + amount
 redis.call('SET', KEYS[1], tostring(new_balance))
-
-local pending = tonumber(redis.call('GET', KEYS[2]))
-if pending ~= nil and pending >= amount then
-  redis.call('DECRBY', KEYS[2], amount)
-  local count = tonumber(redis.call('GET', KEYS[3]))
-  if count ~= nil and count > 0 then
-    redis.call('DECR', KEYS[3])
-  end
-end
 
 return {1, tostring(new_balance)}
 `
