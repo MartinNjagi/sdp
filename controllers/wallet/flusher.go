@@ -26,7 +26,7 @@ const (
 // Flusher runs a background ticker that drains the per-client pending
 // accumulators and ships HTTP POSTs to the Core Wallet Service
 // every FlushInterval. This decouples the hot path (Lua deductions
-// at 10k TPS) from the cold path (PostgreSQL ledger writes).
+// at 10k TPS) from the cold path (MySQL ledger writes).
 type Flusher struct {
 	wallet        *HotWallet
 	rdc           *redis.Client

@@ -10,7 +10,7 @@ import (
 )
 
 // LedgerRefunder makes HMAC-signed HTTP calls to the Core Wallet Service
-// to permanently record refunds in PostgreSQL.
+// to permanently record refunds in MySQL.
 type LedgerRefunder struct {
 	walletSvcURL string
 	httpClient   *http.Client

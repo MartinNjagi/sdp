@@ -84,7 +84,7 @@ Every `DispatchEnvelope`, whether produced by fan-out or published directly for 
 Balances are integer message credits, not currency — one credit roughly equals one billable SMS unit.
 Redis holds the live balance plus a per-client pending-deduction accumulator.
 
-A background Flusher drains every active client's accumulator on a fixed interval (default 30 seconds) and ships a single batched HTTP POST to the Core Engine's cold ledger, so the PostgreSQL wallet table never receives more than one write per client per flush window even under a large campaign blast.
+A background Flusher drains every active client's accumulator on a fixed interval (default 30 seconds) and ships a single batched HTTP POST to the Core Engine's cold ledger, so the MySQL wallet table never receives more than one write per client per flush window even under a large campaign blast.
 
 If a client has no cached balance — a cold Redis instance or a brand-new client — the wallet falls back to a synchronous call against the Core Engine's internal balance endpoint, seeds the result into Redis, and proceeds. This call uses an integer-only contract: a `ClientID` string in, and a `ClientID`/`Balance`/`Currency` triple back, where `Balance` is always a whole-number credit count.
 

@@ -26,7 +26,7 @@ const (
 // atomic Lua scripts. It is the single point of origin for all credit
 // deductions in the SDP. Balances are integer credits (1 credit ≈ 1 SMS
 // unit) — never currency. The Flusher periodically syncs accumulated
-// deductions back to the Core Wallet Service's PostgreSQL ledger.
+// deductions back to the Core Wallet Service's MySQL ledger.
 type HotWallet struct {
 	rdc *redis.Client
 

@@ -30,19 +30,20 @@ const maxRetries = 3
 //
 //	Dequeue → Wallet deduct → Route → Rate-limit → Dispatch → DB update → ACK
 type DispatchWorker struct {
-	ctx        context.Context
-	queueName  string
-	RMQManager *connections.RMQManager // Replaces raw connection
-	ch         *amqplib.Channel        // Restored: Needs to hold the active channel
-	pub        *publisher.Publisher
-	router     *mno_router.Router
-	limiter    *ratelimiter.Limiter
-	disp       dispatcher.Dispatcher
-	hotWallet  *wallet.HotWallet
-	flusher    *wallet.Flusher
-	db         *gorm.DB
-	costEngine *data.CostEngine
-	poolSize   int
+	ctx            context.Context
+	queueName      string
+	RMQManager     *connections.RMQManager // Replaces raw connection
+	ch             *amqplib.Channel        // Restored: Needs to hold the active channel
+	pub            *publisher.Publisher
+	router         *mno_router.Router
+	limiter        *ratelimiter.Limiter
+	disp           dispatcher.Dispatcher
+	hotWallet      *wallet.HotWallet
+	flusher        *wallet.Flusher
+	ledgerRefunder *wallet.LedgerRefunder
+	db             *gorm.DB
+	costEngine     *data.CostEngine
+	poolSize       int
 }
 
 // newDispatchWorker constructs a DispatchWorker bound to a specific queue.
@@ -339,6 +340,13 @@ func (w *DispatchWorker) refund(clientID string, amount int64, reason string) {
 	if err := w.hotWallet.Refund(context.Background(), clientID, float64(amount), reason); err != nil {
 		logrus.Errorf("[DispatchWorker] Refund failed client=%s amount=%d reason=%s: %v",
 			clientID, amount, reason, err)
+	}
+	// 2. Refund Cold Ledger (MySQL via HTTP)
+	// We use 0 for outboxID here or pass the actual outboxID down to the refund method for idempotency
+	if w.ledgerRefunder != nil {
+		if err := w.ledgerRefunder.Refund(context.Background(), clientID, float64(amount), 0); err != nil {
+			logrus.Errorf("[DispatchWorker] HTTP Ledger refund failed for client=%s amount=%d: %v", clientID, amount, err)
+		}
 	}
 }
 

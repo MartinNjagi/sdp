@@ -23,18 +23,19 @@ import (
 // Collecting them into a struct keeps New's signature short and makes it
 // easy to add a new dependency later without touching every call site.
 type Deps struct {
-	RMQManager *connections.RMQManager
-	Publisher  *publisher.Publisher
-	RDC        *redis.Client
-	Router     *mno_router.Router
-	Limiter    *ratelimiter.Limiter
-	Dispatcher dispatcher.Dispatcher
-	HotWallet  *wallet.HotWallet
-	Flusher    *wallet.Flusher
-	CostEngine *data.CostEngine
-	DB         *gorm.DB
-	S3         *storage.S3Service
-	S3Bucket   string
+	RMQManager   *connections.RMQManager
+	Publisher    *publisher.Publisher
+	RDC          *redis.Client
+	Router       *mno_router.Router
+	Limiter      *ratelimiter.Limiter
+	Dispatcher   dispatcher.Dispatcher
+	HotWallet    *wallet.HotWallet
+	Flusher      *wallet.Flusher
+	LedgerRefund *wallet.LedgerRefunder
+	CostEngine   *data.CostEngine
+	DB           *gorm.DB
+	S3           *storage.S3Service
+	S3Bucket     string
 }
 
 // Worker is the orchestrator — it does NOT consume from RabbitMQ itself.
