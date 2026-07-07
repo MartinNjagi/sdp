@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sdp/data"
 	"strings"
 	"time"
@@ -175,22 +176,26 @@ func (d *SafaricomDispatcher) sendBulk(ctx context.Context, msg Message) (*Resul
 	}
 	fallbackURL := "https://dsvc.safaricom.com:9480/api/public/CMS/bulksms"
 
-	dlrURL := d.cfg.SDPBulkDLRURL
-	if dlrURL == "" {
-		dlrURL = "https://reports-service.intouchvas.io/dlr/bulk/{outboxID}"
-	}
-	dlrURL = strings.ReplaceAll(dlrURL, "{outboxID}", fmt.Sprintf("%d", msg.OutboxID))
+	// 1. FORMAT THE ID FIRST so we can send it to Safaricom
+	providerID := fmt.Sprintf("SAF-BULK-%d", msg.OutboxID)
+
+	// 2. WEBHOOK GUARD: Dynamically build the secure DLR URL
+	webhookHost := os.Getenv("SDP_WEBHOOK_HOST") // e.g., https://sdp.a45cba1b.nip.io
+	webhookSecret := os.Getenv("SDP_WEBHOOK_SECRET")
+	dlrURL := fmt.Sprintf("%s/webhooks/%s/dlr/generic", webhookHost, webhookSecret)
 
 	payload := map[string]interface{}{
 		"timeStamp": time.Now().UnixMilli(),
 		"dataSet": []map[string]interface{}{
 			{
-				"userName":          d.cfg.SDPCpID,
-				"channel":           coalesce(d.cfg.SDPBulkChannel, "sms"),
-				"oa":                msg.SenderID,
-				"msisdn":            msg.MSISDN,
-				"message":           msg.Body,
-				"uniqueId":          fmt.Sprintf("%d", msg.OutboxID),
+				"userName": d.cfg.SDPCpID,
+				"channel":  coalesce(d.cfg.SDPBulkChannel, "sms"),
+				"oa":       msg.SenderID,
+				"msisdn":   msg.MSISDN,
+				"message":  msg.Body,
+
+				// 3. SEND THE FULL PROVIDER ID!
+				"uniqueId":          providerID,
 				"actionResponseURL": dlrURL,
 			},
 		},
@@ -230,10 +235,9 @@ func (d *SafaricomDispatcher) sendBulk(ctx context.Context, msg Message) (*Resul
 		return nil, Permanent(fmt.Errorf("safaricom bulk: rejected code=%s", resp.StatusCode))
 	}
 
-	// Safaricom bulk does not return a per-message ID in the submit response —
-	// the DLR webhook carries the correlation via uniqueId/outboxID.
-	providerID := fmt.Sprintf("SAF-BULK-%d", msg.OutboxID)
 	log.Debugf("Bulk dispatched ok provider_id=%s", providerID)
+
+	// We return the exact same ID we sent!
 	return &Result{ProviderMsgID: providerID}, nil
 }
 
@@ -252,12 +256,17 @@ func (d *SafaricomDispatcher) sendTransactional(ctx context.Context, msg Message
 		sendURL = "https://dsvc.safaricom.com:8480/api/public/SDP/sendSMSRequest"
 	}
 
+	// 1. FORMAT THE ID FIRST
+	providerID := fmt.Sprintf("SAF-TX-%d", msg.OutboxID)
+
 	type dataParam struct {
 		Name  string `json:"Name"`
 		Value string `json:"Value"`
 	}
+
 	payload := map[string]interface{}{
-		"RequestID":        fmt.Sprintf("%d", msg.OutboxID),
+		// 2. SEND THE FULL PROVIDER ID HERE
+		"RequestID":        providerID,
 		"RequestTimeStamp": time.Now().UnixMilli(),
 		"Channel":          coalesce(d.cfg.SDPSendSMSChannel, "sms"),
 		"SourceAddress":    d.cfg.SDPSourceAddress,
@@ -299,8 +308,9 @@ func (d *SafaricomDispatcher) sendTransactional(ctx context.Context, msg Message
 		return nil, Permanent(fmt.Errorf("safaricom transactional: parse response: %w", err))
 	}
 
-	providerID := fmt.Sprintf("SAF-TX-%d", msg.OutboxID)
 	log.Debugf("Transactional dispatched ok status_code=%s", resp.ResponseParam.StatusCode)
+
+	// We return the exact same ID we sent!
 	return &Result{ProviderMsgID: providerID}, nil
 }
 
