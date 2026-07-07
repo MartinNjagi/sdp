@@ -11,6 +11,7 @@ import (
 	"sdp/controllers/storage"
 	"sdp/controllers/wallet"
 	"sdp/data"
+	"strings"
 
 	"sync"
 
@@ -115,4 +116,10 @@ func (w *Worker) Stop() {
 	w.bulk.closeChannel()
 	w.vip.closeChannel()
 	w.standard.closeChannel()
+}
+
+// NormalizeMSISDN removes whitespace and strips the leading '+'
+func NormalizeMSISDN(number string) string {
+	number = strings.ReplaceAll(number, " ", "")
+	return strings.TrimPrefix(number, "+")
 }

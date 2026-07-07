@@ -262,19 +262,22 @@ func (w *BulkWorker) handle(workerID int, d amqplib.Delivery) {
 	}
 }
 
-// Local struct mapping just for the FirstOrCreate check
+// PhoneNumber Local struct mapping just for the FirstOrCreate check
 type PhoneNumber struct {
 	ID     uint64 `gorm:"primaryKey;autoIncrement"`
 	MSISDN string `gorm:"column:msisdn"`
 }
 
 func (w *BulkWorker) processContact(env data.BulkEnvelope, templateBody string, contact Contact) error {
+	// Clean the number right at the start to ensure everything downstream is perfect!
+	cleanNumber := NormalizeMSISDN(contact.MSISDN)
+
 	// PRECHECK: Ensure we have a PhoneID
 	if contact.PhoneID == 0 {
 		var pn PhoneNumber
 		err := w.db.Table("phone_numbers").
-			Where("msisdn = ?", contact.MSISDN).
-			FirstOrCreate(&pn, map[string]interface{}{"msisdn": contact.MSISDN}).Error
+			Where("msisdn = ?", cleanNumber).
+			FirstOrCreate(&pn, map[string]interface{}{"msisdn": cleanNumber}).Error
 
 		if err != nil {
 			return fmt.Errorf("failed to resolve phone_id: %w", err)
@@ -285,7 +288,7 @@ func (w *BulkWorker) processContact(env data.BulkEnvelope, templateBody string, 
 	// USE THE PRE-FETCHED STRING HERE:
 	compiled := compileTemplate(templateBody, contact.Replacements)
 
-	route, err := w.router.Resolve(contact.MSISDN)
+	route, err := w.router.Resolve(cleanNumber)
 	if err != nil {
 		return fmt.Errorf("resolve route: %w", err)
 	}
@@ -299,17 +302,26 @@ func (w *BulkWorker) processContact(env data.BulkEnvelope, templateBody string, 
 		return fmt.Errorf("price message: %w", err)
 	}
 
-	// Write Outbox row
-	outboxID, err := w.writeOutbox(env, contact.PhoneID, contact.MSISDN, compiled, priced.TotalCredits)
+	cost := priced.TotalCredits
+
+	outboxID, err := w.writeOutbox(env, contact.PhoneID, cleanNumber, compiled, cost)
 	if err != nil {
-		return fmt.Errorf("write outbox: %w", err)
+		// FIX: Use return instead of continue!
+		return fmt.Errorf("database error writing outbox: %w", err)
+	}
+
+	// 🪄 MAGIC DEDUPLICATION TRIGGER
+	if outboxID == 0 {
+		logrus.Debugf("Skipping duplicate: %s already processed for campaign %d", cleanNumber, env.CampaignID)
+		// FIX: Return nil to exit the function gracefully without publishing to RabbitMQ!
+		return nil
 	}
 
 	// Publish DispatchEnvelope
 	dispatch := data.DispatchEnvelope{
 		OutboxID:    outboxID,
 		ClientID:    env.ClientID,
-		MSISDN:      contact.MSISDN,
+		MSISDN:      cleanNumber, // Use the cleaned number
 		SenderID:    env.SenderID,
 		Message:     compiled,
 		MessageType: "bulk",
@@ -338,23 +350,32 @@ func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, phoneID uint64, msisdn, 
 		"updated_at":  time.Now(),
 	}
 
-	// Use ON CONFLICT DO NOTHING (translates to INSERT IGNORE in MySQL)
-	// If a worker crashes mid-chunk and replays from the last cursor, this prevents duplicate sends.
 	result := w.db.Table("outboxes").
 		Clauses(clause.OnConflict{DoNothing: true}).
 		Create(row)
 
+	// 1. Check for actual DB errors
 	if result.Error != nil {
-		return 0, result.Error
+		return 0, fmt.Errorf("failed to save outbox for %s: %w", msisdn, result.Error)
 	}
 
-	// Retrieve the inserted ID.
+	// 2. THE IDEMPOTENCY CHECK
+	// If RowsAffected is 0, the unique index blocked it (it's a duplicate).
+	if result.RowsAffected == 0 {
+		// Return 0 for the ID so the caller knows to skip it!
+		return 0, nil
+	}
+
+	// 3. Fetch the ID (Only runs if it was a fresh insert)
 	var outbox struct{ ID uint64 }
-	w.db.Table("outboxes").
+	err := w.db.Table("outboxes").
 		Where("client_id = ? AND msisdn = ? AND campaign_id = ?", env.ClientID, msisdn, campaignID).
-		Order("created_at DESC").
 		Select("id").
-		First(&outbox)
+		First(&outbox).Error
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to retrieve outbox id for %s: %w", msisdn, err)
+	}
 
 	return outbox.ID, nil
 }
@@ -480,7 +501,8 @@ func (w *BulkWorker) fetchContactsFromFile(fileKey string) ([]Contact, error) {
 		}
 
 		contacts = append(contacts, Contact{
-			MSISDN:       strings.TrimSpace(row[msisdnIdx]),
+			// 🪄 Clean it immediately
+			MSISDN:       NormalizeMSISDN(row[msisdnIdx]),
 			Replacements: replacements,
 		})
 	}
