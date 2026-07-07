@@ -11,8 +11,9 @@ import (
 
 // AllowedMNOIPs Known MNO Subnets (Safaricom, Africa's Talking, etc.)
 var AllowedMNOIPs = []string{
-	"196.201.214.", // Safaricom
-	"196.201.213.", // Safaricom
+	"196.201.214.",  // Safaricom
+	"196.201.213.",  // Safaricom
+	"164.92.186.27", // Internal
 	// Add Africa's Talking subnets here if they publish them
 }
 

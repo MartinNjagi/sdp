@@ -351,7 +351,10 @@ func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, phoneID uint64, msisdn, 
 	}
 
 	result := w.db.Table("outboxes").
-		Clauses(clause.OnConflict{DoNothing: true}).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "campaign_id"}, {Name: "phone_id"}},
+			DoNothing: true,
+		}).
 		Create(row)
 
 	// 1. Check for actual DB errors
