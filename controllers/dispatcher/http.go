@@ -172,9 +172,17 @@ func (d *SafaricomDispatcher) sendBulk(ctx context.Context, msg Message) (*Resul
 
 	bulkURL := d.cfg.SDPBulkSMSURL
 	if bulkURL == "" {
-		bulkURL = "https://dsdp-apinb.safaricom.com/api/public/CMS/bulksms"
+		//bulkURL = "https://dsdp-apinb.safaricom.com/api/public/CMS/bulksms"
+
+		logrus.Error("Empty bulk URL")
+		return nil, fmt.Errorf("empty bulk URL")
 	}
-	fallbackURL := "https://dsvc.safaricom.com:9480/api/public/CMS/bulksms"
+	//fallbackURL := "https://dsvc.safaricom.com:9480/api/public/CMS/bulksms"
+	fallbackURL := d.cfg.FallbackURL
+	if fallbackURL == "" {
+		logrus.Error("Empty fallback URL")
+		return nil, fmt.Errorf("empty fallback URL")
+	}
 
 	// 1. FORMAT THE ID FIRST so we can send it to Safaricom
 	providerID := fmt.Sprintf("SAF-BULK-%d", msg.OutboxID)

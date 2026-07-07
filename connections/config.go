@@ -83,6 +83,7 @@ func InitConfig() *data.AppConfig {
 		SDPSourceAddress:   getEnv("SDP_SOURCE_ADDRESS", ""),
 		SDPBulkSMSURL:      getEnv("SDP_BULK_SMS_URL", ""),
 		SDPBulkDLRURL:      getEnv("SDP_BULK_SMS_DLR_URL", ""),
+		FallbackURL:        getEnv("SDP_FALLBACK_URL", ""),
 		SDPBulkChannel:     getEnv("SDP_BULK_SMS_CHANNEL", "sms"),
 		SDPSendSMSURL:      getEnv("SDP_SENDSMS_URL", ""),
 		SDPSendSMSChannel:  getEnv("SDP_SENDSMS_CHANNEL", "sms"),

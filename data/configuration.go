@@ -78,6 +78,7 @@ type AppConfig struct {
 	SDPCpID            string // SDP_CPID
 	SDPSourceAddress   string // SDP_SOURCE_ADDRESS
 	SDPBulkSMSURL      string // SDP_BULK_SMS_URL
+	FallbackURL        string
 	SDPBulkDLRURL      string // SDP_BULK_SMS_DLR_URL
 	SDPBulkChannel     string // SDP_BULK_SMS_CHANNEL:  default "sms"
 	SDPSendSMSURL      string // SDP_SENDSMS_URL
