@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/redis/go-redis/v9"
-	"gorm.io/gorm/clause"
 	"io"
 	"regexp"
 	"sdp/connections"
@@ -336,43 +335,28 @@ func (w *BulkWorker) processContact(env data.BulkEnvelope, templateBody string, 
 // --------------------------------------------------------------------------
 
 func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, phoneID uint64, msisdn, message string, cost int64) (uint64, error) {
-	campaignID := env.CampaignID
-	row := map[string]interface{}{
-		"client_id":   env.ClientID,
-		"campaign_id": campaignID,
-		"phone_id":    phoneID,
-		"msisdn":      msisdn,
-		"sender_id":   env.SenderID,
-		"message":     message,
-		"cost":        cost,
-		"status":      "PENDING",
-		"created_at":  time.Now(),
-		"updated_at":  time.Now(),
-	}
+	now := time.Now()
 
-	result := w.db.Table("outboxes").
-		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "campaign_id"}, {Name: "phone_id"}},
-			DoNothing: true,
-		}).
-		Create(row)
+	result := w.db.Exec(`
+        INSERT INTO outboxes
+            (client_id, campaign_id, phone_id, msisdn, sender_id, message, cost, status, created_at, updated_at)
+        VALUES
+            (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+        ON DUPLICATE KEY UPDATE
+            campaign_id = campaign_id
+    `, env.ClientID, env.CampaignID, phoneID, msisdn, env.SenderID, message, cost, now, now)
 
-	// 1. Check for actual DB errors
 	if result.Error != nil {
 		return 0, fmt.Errorf("failed to save outbox for %s: %w", msisdn, result.Error)
 	}
 
-	// 2. THE IDEMPOTENCY CHECK
-	// If RowsAffected is 0, the unique index blocked it (it's a duplicate).
 	if result.RowsAffected == 0 {
-		// Return 0 for the ID so the caller knows to skip it!
 		return 0, nil
 	}
 
-	// 3. Fetch the ID (Only runs if it was a fresh insert)
 	var outbox struct{ ID uint64 }
 	err := w.db.Table("outboxes").
-		Where("client_id = ? AND msisdn = ? AND campaign_id = ?", env.ClientID, msisdn, campaignID).
+		Where("client_id = ? AND msisdn = ? AND campaign_id = ?", env.ClientID, msisdn, env.CampaignID).
 		Select("id").
 		First(&outbox).Error
 
