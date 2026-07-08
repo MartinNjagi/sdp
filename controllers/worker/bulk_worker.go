@@ -303,12 +303,17 @@ func (w *BulkWorker) processContact(env data.BulkEnvelope, templateBody string, 
 	// PRECHECK: Ensure we have a PhoneID
 	if contact.PhoneID == 0 {
 		var pn PhoneNumber
+		// 1. Try to find it without ORDER BY
 		err := w.db.Table("phone_numbers").
 			Where("msisdn = ?", cleanNumber).
-			FirstOrCreate(&pn, map[string]interface{}{"msisdn": cleanNumber}).Error
+			Take(&pn).Error
 
+		// 2. If it doesn't exist, create it
 		if err != nil {
-			return fmt.Errorf("failed to resolve phone_id: %w", err)
+			pn.MSISDN = cleanNumber
+			if createErr := w.db.Table("phone_numbers").Create(&pn).Error; createErr != nil {
+				return fmt.Errorf("failed to create phone_id: %w", createErr)
+			}
 		}
 		contact.PhoneID = pn.ID
 	}
@@ -387,7 +392,7 @@ func (w *BulkWorker) writeOutbox(env data.BulkEnvelope, phoneID uint64, msisdn, 
 	err := w.db.Table("outboxes").
 		Where("client_id = ? AND msisdn = ? AND campaign_id = ?", env.ClientID, msisdn, env.CampaignID).
 		Select("id").
-		First(&outbox).Error
+		Take(&outbox).Error
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to retrieve outbox id for %s: %w", msisdn, err)
