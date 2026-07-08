@@ -120,7 +120,7 @@ func New(
 	ledgerRefunder := wallet.NewLedgerRefunder(baseURL, client)
 
 	// Attach both to the Reconciler
-	rec := dlr.NewReconciler(db).
+	rec := dlr.NewReconciler(db, rdc).
 		WithWalletRefunder(hotWallet).
 		WithLedgerRefunder(ledgerRefunder). // <-- NEW
 		WithSSENotifier(sseNotifier)
@@ -194,6 +194,10 @@ func (s *SDP) Start() {
 
 	// Start the 10-minute campaign cron job
 	StartCampaignMonitor(s.ctx, s.db)
+
+	// Start DLR Accumulator
+	s.reconciler.StartDLRFlusher(s.ctx)
+
 	logrus.Info("[SDP] ✅ All components running")
 }
 

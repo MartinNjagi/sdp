@@ -2,7 +2,10 @@ package dlr
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
+	"errors"
+	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm/clause"
 	"strings"
 	"time"
 
@@ -39,6 +42,7 @@ const (
 // setter methods so the struct can be constructed without them for unit tests.
 type Reconciler struct {
 	db                *gorm.DB
+	rdc               *redis.Client
 	hotWalletRefunder WalletRefunder // Restores Redis balance
 	ledgerRefunder    LedgerRefunder // Updates DB via HTTP (NEW)
 	sseNotifier       SSENotifier
@@ -68,8 +72,20 @@ type WebhookFirer interface {
 // NewReconciler creates a Reconciler with only the DB wired in.
 // Use WithWalletRefunder / WithSSENotifier / WithWebhookFirer to attach
 // optional downstream services after construction.
-func NewReconciler(db *gorm.DB) *Reconciler {
-	return &Reconciler{db: db}
+func NewReconciler(db *gorm.DB, rdc *redis.Client) *Reconciler {
+	return &Reconciler{db: db, rdc: rdc}
+}
+
+// 1. The Lightning-Fast Webhook Handler
+func (r *Reconciler) Handle(ctx context.Context, raw RawDLR) error {
+	// Just dump the raw DLR into a Redis List and return immediately!
+	dataBytes, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+
+	// Push to the right side of the list
+	return r.rdc.RPush(ctx, "dlr:pending_updates", dataBytes).Err()
 }
 
 // WithWalletRefunder attaches the wallet service. Returns self for chaining.
@@ -102,58 +118,11 @@ func (r *Reconciler) WithLedgerRefunder(l LedgerRefunder) *Reconciler {
 
 // outboxRecord is the minimal projection we need from the outboxes table.
 type outboxRecord struct {
-	ID       uint64
-	ClientID string
-	Status   string
-	Cost     float64
-}
-
-// Handle is the main entry point. It:
-//  1. Normalises the raw Telco status to a platform status.
-//  2. Loads the matching Outbox record by provider message ID.
-//  3. Updates the record's status.
-//  4. Triggers refund / SSE / webhook based on the outcome.
-func (r *Reconciler) Handle(ctx context.Context, raw RawDLR) error {
-	log := logrus.WithFields(logrus.Fields{
-		"source":          raw.Source,
-		"provider_msg_id": raw.ProviderMsgID,
-		"raw_status":      raw.RawStatus,
-	})
-
-	// 1. Normalise status.
-	platformStatus := normalise(raw.RawStatus)
-	log.Debugf("Normalised status → %s", platformStatus)
-
-	// 2. Load the Outbox record.
-	var record outboxRecord
-	if err := r.db.WithContext(ctx).
-		Table("outboxes").
-		Select("id, client_id, status, cost").
-		Where("message_id = ?", raw.ProviderMsgID).
-		First(&record).Error; err != nil {
-		return fmt.Errorf("dlr reconciler: lookup message_id=%s: %w", raw.ProviderMsgID, err)
-	}
-
-	// Idempotency guard: if the record is already in a terminal state, skip.
-	if isTerminal(record.Status) {
-		log.Infof("Outbox id=%d already in terminal state=%s — skipping", record.ID, record.Status)
-		return nil
-	}
-
-	// 3. Update status in DB.
-	if err := r.db.WithContext(ctx).
-		Exec(`UPDATE outboxes SET status = ?, updated_at = ? WHERE id = ?`,
-			platformStatus, time.Now(), record.ID).Error; err != nil {
-		return fmt.Errorf("dlr reconciler: update outbox id=%d: %w", record.ID, err)
-	}
-
-	log.Infof("Outbox id=%d updated to %s", record.ID, platformStatus)
-
-	// 4. Downstream effects — run best-effort; log errors but don't fail the
-	//    reconciliation (the DB update already succeeded).
-	r.dispatchEffects(ctx, log, record, platformStatus)
-
-	return nil
+	ID        uint64
+	ClientID  string
+	MessageID string
+	Status    string
+	Cost      float64
 }
 
 // dispatchEffects runs wallet refund, SSE broadcast, and client webhook.
@@ -242,4 +211,104 @@ func isTerminal(status string) bool {
 		return true
 	}
 	return false
+}
+
+// StartDLRFlusher runs in the background. Call this from sdp.Start()
+func (r *Reconciler) StartDLRFlusher(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second) // Flush every 2 seconds
+
+	go func() {
+		logrus.Info("[DLR Flusher] Started batch processor ✅")
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				r.flushBatch(context.Background()) // Final flush on shutdown
+				return
+			case <-ticker.C:
+				r.flushBatch(ctx)
+			}
+		}
+	}()
+}
+
+func (r *Reconciler) flushBatch(ctx context.Context) {
+	// Pop up to 1000 DLRs from Redis atomically
+	// Note: LPOP count requires Redis 6.2+
+	results, err := r.rdc.LPopCount(ctx, "dlr:pending_updates", 1000).Result()
+	if errors.Is(err, redis.Nil) || len(results) == 0 {
+		return // Nothing to process
+	} else if err != nil {
+		logrus.Errorf("[DLR Flusher] Redis read error: %v", err)
+		return
+	}
+
+	// 1. Deduplicate incoming DLRs (MNOs sometimes send the same webhook twice instantly)
+	// We only keep the latest status for each ProviderMsgID
+	dlrMap := make(map[string]RawDLR)
+	for _, res := range results {
+		var raw RawDLR
+		_ = json.Unmarshal([]byte(res), &raw)
+		dlrMap[raw.ProviderMsgID] = raw
+	}
+
+	var msgIDs []string
+	for id := range dlrMap {
+		msgIDs = append(msgIDs, id)
+	}
+
+	// 2. Fetch all matching Outboxes in exactly ONE query
+	var outboxes []outboxRecord
+	if err := r.db.WithContext(ctx).
+		Table("outboxes").
+		Select("id, client_id, message_id, status, cost").
+		Where("message_id IN ?", msgIDs).
+		Find(&outboxes).Error; err != nil {
+		logrus.Errorf("[DLR Flusher] DB Select error: %v", err)
+		// Push them back to Redis so we don't lose them!
+		r.rdc.RPush(ctx, "dlr:pending_updates", results)
+		return
+	}
+
+	// 3. Prepare the Bulk Update and trigger side effects
+	var toUpdate []map[string]interface{}
+
+	for _, ob := range outboxes {
+		if isTerminal(ob.Status) {
+			continue // Already processed previously
+		}
+
+		rawDLR := dlrMap[ob.MessageID]
+		newStatus := normalise(rawDLR.RawStatus)
+
+		// Prepare map for GORM bulk update
+		toUpdate = append(toUpdate, map[string]interface{}{
+			"id":         ob.ID,
+			"status":     newStatus,
+			"updated_at": time.Now(),
+		})
+
+		// Trigger Refunds, Webhooks, SSE (These are asynchronous/fast)
+		r.dispatchEffects(ctx, logrus.NewEntry(logrus.StandardLogger()), ob, newStatus)
+	}
+
+	if len(toUpdate) == 0 {
+		return
+	}
+
+	// 4. Perform ONE massive Bulk Update!
+	// This generates: INSERT INTO outboxes (id, status) VALUES (...) ON DUPLICATE KEY UPDATE status=VALUES(status)
+	err = r.db.WithContext(ctx).Table("outboxes").
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "id"}}, // Match on Primary Key
+			DoUpdates: clause.AssignmentColumns([]string{"status", "updated_at"}),
+		}).
+		Create(&toUpdate).Error
+
+	if err != nil {
+		logrus.Errorf("[DLR Flusher] Bulk Update failed: %v", err)
+	} else {
+		logrus.Infof("[DLR Flusher] Successfully bulk-updated %d message statuses", len(toUpdate))
+	}
 }
