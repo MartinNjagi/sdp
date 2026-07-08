@@ -180,27 +180,32 @@ func (w *Worker) flushSentBatch(ctx context.Context) {
 		updateMap[p.OutboxID] = p.ProviderMsgID
 	}
 
-	// Bulk update using a single transaction
-	err = w.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		for id, msgID := range updateMap {
-			if err := tx.Table("outboxes").
-				Where("id = ?", id).
-				Updates(map[string]interface{}{
-					"status":     "SENT",
-					"message_id": msgID,
-					"updated_at": time.Now(),
-				}).Error; err != nil {
-				return err // Rollback everything if one fails
-			}
-		}
-		return nil
-	})
+	// In controllers/worker/worker.go -> flushSentBatch()
+	if len(updateMap) == 0 {
+		return
+	}
+
+	// Build exactly ONE query to update thousands of rows
+	query := "UPDATE outboxes SET status = 'SENT', updated_at = NOW(), message_id = CASE id "
+	var args []interface{}
+	var ids []uint64
+
+	for id, msgID := range updateMap {
+		query += "WHEN ? THEN ? "
+		args = append(args, id, msgID)
+		ids = append(ids, id)
+	}
+
+	query += "END WHERE id IN ?"
+	args = append(args, ids)
+
+	// Execute the massive update in a single network round-trip
+	err = w.db.WithContext(ctx).Exec(query, args...).Error
 
 	if err != nil {
-		logrus.Errorf("[Sent Batcher] Transaction update failed: %v", err)
-		// Push the records back to Redis so we don't lose them!
+		logrus.Errorf("[Sent Batcher] Bulk CASE update failed: %v", err)
 		w.rdc.RPush(ctx, "dispatch:sent_updates", results)
 	} else {
-		logrus.Infof("[Sent Batcher] Successfully bulk-updated %d messages to SENT", len(updateMap))
+		logrus.Infof("[Sent Batcher] Successfully bulk-updated %d messages to SENT in 1 query", len(updateMap))
 	}
 }

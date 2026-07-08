@@ -301,26 +301,26 @@ func (r *Reconciler) flushBatch(ctx context.Context) {
 		return
 	}
 
-	// 4. Perform the Updates inside a SINGLE Transaction!
-	// This executes in milliseconds and only syncs to the disk once at the very end.
-	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		for _, payload := range toUpdate {
-			if err := tx.Table("outboxes").
-				Where("id = ?", payload.ID).
-				Updates(map[string]interface{}{
-					"status":     payload.Status,
-					"updated_at": payload.UpdatedAt,
-				}).Error; err != nil {
-				return err // Rolls back the entire batch if one fails
-			}
-		}
-		return nil // Commits the transaction
-	})
+	// Build exactly ONE query for the DLR updates
+	query := "UPDATE outboxes SET updated_at = NOW(), status = CASE id "
+	var args []interface{}
+	var ids []uint64
+
+	for _, payload := range toUpdate {
+		query += "WHEN ? THEN ? "
+		args = append(args, payload.ID, payload.Status)
+		ids = append(ids, payload.ID)
+	}
+
+	query += "END WHERE id IN ?"
+	args = append(args, ids)
+
+	// Execute the massive update in a single network round-trip
+	err = r.db.WithContext(ctx).Exec(query, args...).Error
 
 	if err != nil {
-		logrus.Errorf("[DLR Flusher] Transaction Update failed: %v", err)
-		// Optionally, push the unhandled DLRs back to Redis here if you want to retry later
+		logrus.Errorf("[DLR Flusher] Bulk CASE update failed: %v", err)
 	} else {
-		logrus.Infof("[DLR Flusher] Successfully bulk-updated %d message statuses", len(toUpdate))
+		logrus.Infof("[DLR Flusher] Successfully bulk-updated %d message statuses in 1 query", len(toUpdate))
 	}
 }

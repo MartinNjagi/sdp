@@ -49,11 +49,19 @@ func NewHTTP(cfg *data.AppConfig) (*ATDispatcher, error) {
 	if baseURL == "" {
 		baseURL = "https://api.africastalking.com/version1/messaging"
 	}
+
+	// 🚀 Create a high-throughput custom transport
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 2000
+	t.MaxConnsPerHost = 2000
+	t.MaxIdleConnsPerHost = 2000
+
 	return &ATDispatcher{
 		apiKey:   cfg.ATAPIKey,
 		username: cfg.ATUsername,
 		baseURL:  baseURL,
-		client:   &http.Client{Timeout: 15 * time.Second},
+		client: &http.Client{Timeout: 15 * time.Second,
+			Transport: t},
 	}, nil
 }
 
@@ -141,9 +149,16 @@ func NewSafaricom(cfg *data.AppConfig, tokenGetter func() string) (*SafaricomDis
 	if tokenGetter == nil {
 		return nil, fmt.Errorf("safaricom dispatcher: tokenGetter must not be nil")
 	}
+
+	// 🚀 Create a high-throughput custom transport
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 2000
+	t.MaxConnsPerHost = 2000
+	t.MaxIdleConnsPerHost = 2000
 	return &SafaricomDispatcher{
-		cfg:         cfg,
-		client:      &http.Client{Timeout: 30 * time.Second},
+		cfg: cfg,
+		client: &http.Client{Timeout: 30 * time.Second,
+			Transport: t},
 		tokenGetter: tokenGetter,
 	}, nil
 }
