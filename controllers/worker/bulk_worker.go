@@ -144,7 +144,7 @@ func (w *BulkWorker) consume(id int) {
 			continue
 		}
 
-		logrus.Infof("[BulkWorker-%d] Listening", id)
+		//logrus.Infof("[BulkWorker-%d] Listening", id)
 
 		// 3. Inner process loop
 	processLoop:

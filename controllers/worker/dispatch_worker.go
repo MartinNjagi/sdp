@@ -153,7 +153,7 @@ func (w *DispatchWorker) consume(id int) {
 			continue
 		}
 
-		logrus.Infof("[DispatchWorker/%s-%d] Listening", w.queueName, id)
+		//logrus.Infof("[DispatchWorker/%s-%d] Listening", w.queueName, id)
 
 		// 3. Inner process loop
 	processLoop:

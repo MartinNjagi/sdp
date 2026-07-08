@@ -302,8 +302,9 @@ func (r *Reconciler) flushBatch(ctx context.Context) {
 	}
 
 	// Build exactly ONE query for the DLR updates
-	query := "UPDATE outboxes SET updated_at = NOW(), status = CASE id "
+	query := "UPDATE outboxes SET updated_at = ?, status = CASE id "
 	var args []interface{}
+	args = append(args, time.Now()) // <-- Pass Go's localized time here
 	var ids []uint64
 
 	for _, payload := range toUpdate {

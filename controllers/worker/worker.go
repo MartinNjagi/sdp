@@ -186,10 +186,10 @@ func (w *Worker) flushSentBatch(ctx context.Context) {
 	}
 
 	// Build exactly ONE query to update thousands of rows
-	query := "UPDATE outboxes SET status = 'SENT', updated_at = NOW(), message_id = CASE id "
+	query := "UPDATE outboxes SET status = 'SENT', updated_at = ?, message_id = CASE id "
 	var args []interface{}
 	var ids []uint64
-
+	args = append(args, time.Now()) // <-- Pass Go's localized time here
 	for id, msgID := range updateMap {
 		query += "WHEN ? THEN ? "
 		args = append(args, id, msgID)
