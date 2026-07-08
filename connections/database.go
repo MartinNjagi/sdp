@@ -6,6 +6,7 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"sdp/data"
+	"time"
 )
 
 func InitDB(cfg *data.AppConfig) *gorm.DB {
@@ -15,6 +16,16 @@ func InitDB(cfg *data.AppConfig) *gorm.DB {
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
 		logrus.Fatalf("DB connection failed: %v", err)
+	}
+
+	sqlDB, err := db.DB()
+	if err == nil {
+		// Set maximum number of open connections to the database.
+		sqlDB.SetMaxOpenConns(200)
+		// Set maximum number of idle connections in the pool.
+		sqlDB.SetMaxIdleConns(50)
+		// Set maximum time a connection can be reused.
+		sqlDB.SetConnMaxLifetime(time.Hour)
 	}
 
 	DB = db
