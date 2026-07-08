@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/redis/go-redis/v9"
 	"sdp/connections"
 	"sdp/controllers/dispatcher"
 	"sdp/controllers/mno_router"
@@ -42,6 +43,7 @@ type DispatchWorker struct {
 	flusher        *wallet.Flusher
 	ledgerRefunder *wallet.LedgerRefunder
 	db             *gorm.DB
+	rdc            *redis.Client
 	costEngine     *data.CostEngine
 	poolSize       int
 }
@@ -79,6 +81,7 @@ func newDispatchWorker(
 		hotWallet:  deps.HotWallet,
 		flusher:    deps.Flusher,
 		db:         deps.DB,
+		rdc:        deps.RDC,
 		poolSize:   poolSize,
 	}, nil
 }
@@ -314,10 +317,14 @@ func (w *DispatchWorker) handleDispatchError(
 // --------------------------------------------------------------------------
 
 func (w *DispatchWorker) markSent(outboxID uint64, providerMsgID string) error {
-	return w.db.Exec(
-		`UPDATE outboxes SET status = 'SENT', message_id = ?, updated_at = ? WHERE id = ?`,
-		providerMsgID, time.Now(), outboxID,
-	).Error
+	payload := map[string]interface{}{
+		"outbox_id":       outboxID,
+		"provider_msg_id": providerMsgID,
+	}
+	dataBytes, _ := json.Marshal(payload)
+
+	// Push instantly to Redis instead of waiting for MySQL
+	return w.rdc.RPush(w.ctx, "dispatch:sent_updates", dataBytes).Err()
 }
 
 func (w *DispatchWorker) markFailed(outboxID uint64, reason string) {

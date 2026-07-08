@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/redis/go-redis/v9"
-	"gorm.io/gorm/clause"
 	"strings"
 	"time"
 
@@ -271,8 +270,14 @@ func (r *Reconciler) flushBatch(ctx context.Context) {
 		return
 	}
 
-	// 3. Prepare the Bulk Update and trigger side effects
-	var toUpdate []map[string]interface{}
+	// 3. Prepare the updates and trigger side-effects
+	// We use a struct to hold the data for our transaction loop
+	type updatePayload struct {
+		ID        uint64
+		Status    string
+		UpdatedAt time.Time
+	}
+	var toUpdate []updatePayload
 
 	for _, ob := range outboxes {
 		if isTerminal(ob.Status) {
@@ -282,11 +287,10 @@ func (r *Reconciler) flushBatch(ctx context.Context) {
 		rawDLR := dlrMap[ob.MessageID]
 		newStatus := normalise(rawDLR.RawStatus)
 
-		// Prepare map for GORM bulk update
-		toUpdate = append(toUpdate, map[string]interface{}{
-			"id":         ob.ID,
-			"status":     newStatus,
-			"updated_at": time.Now(),
+		toUpdate = append(toUpdate, updatePayload{
+			ID:        ob.ID,
+			Status:    newStatus,
+			UpdatedAt: time.Now(),
 		})
 
 		// Trigger Refunds, Webhooks, SSE (These are asynchronous/fast)
@@ -297,17 +301,25 @@ func (r *Reconciler) flushBatch(ctx context.Context) {
 		return
 	}
 
-	// 4. Perform ONE massive Bulk Update!
-	// This generates: INSERT INTO outboxes (id, status) VALUES (...) ON DUPLICATE KEY UPDATE status=VALUES(status)
-	err = r.db.WithContext(ctx).Table("outboxes").
-		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "id"}}, // Match on Primary Key
-			DoUpdates: clause.AssignmentColumns([]string{"status", "updated_at"}),
-		}).
-		Create(&toUpdate).Error
+	// 4. Perform the Updates inside a SINGLE Transaction!
+	// This executes in milliseconds and only syncs to the disk once at the very end.
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, payload := range toUpdate {
+			if err := tx.Table("outboxes").
+				Where("id = ?", payload.ID).
+				Updates(map[string]interface{}{
+					"status":     payload.Status,
+					"updated_at": payload.UpdatedAt,
+				}).Error; err != nil {
+				return err // Rolls back the entire batch if one fails
+			}
+		}
+		return nil // Commits the transaction
+	})
 
 	if err != nil {
-		logrus.Errorf("[DLR Flusher] Bulk Update failed: %v", err)
+		logrus.Errorf("[DLR Flusher] Transaction Update failed: %v", err)
+		// Optionally, push the unhandled DLRs back to Redis here if you want to retry later
 	} else {
 		logrus.Infof("[DLR Flusher] Successfully bulk-updated %d message statuses", len(toUpdate))
 	}
