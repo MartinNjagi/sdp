@@ -63,6 +63,8 @@ type Worker struct {
 // bundle plus ctx/cfg. Called once by SDP.New.
 func New(ctx context.Context, cfg *data.AppConfig, deps Deps) (*Worker, error) {
 
+	logrus.Printf("Workers Bulk %d, VIP %d, Standard %d, Flusher %d", cfg.WorkerPoolBulk, cfg.WorkerPoolVIP, cfg.WorkerPoolStandard, cfg.WalletFlushInterval)
+
 	bulk, err := newBulkWorker(ctx, deps.RMQManager, deps.Publisher, deps.RDC, deps.Router, deps.CostEngine, deps.DB, deps.S3, cfg.WorkerPoolBulk, cfg.S3Bucket)
 	if err != nil {
 		return nil, err

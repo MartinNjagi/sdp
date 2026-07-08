@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	amqplib "github.com/rabbitmq/amqp091-go"
@@ -86,7 +87,7 @@ func (w *BulkWorker) start(wg *sync.WaitGroup) {
 			w.consume(id)
 		}(i)
 	}
-	logrus.Infof("[BulkWorker] Pool of %d goroutines started on %s", w.poolSize, publisher.QueueBulk)
+	//logrus.Infof("[BulkWorker] Pool of %d goroutines started on %s", w.poolSize, publisher.QueueBulk)
 }
 
 // Phase 1: Tell RabbitMQ to stop sending new messages to this worker pool
@@ -238,19 +239,47 @@ func (w *BulkWorker) handle(workerID int, d amqplib.Delivery) {
 		return
 	}
 
-	// 5. Fan-out this chunk
-	failed := 0
+	// 5. Fan-out this chunk CONCURRENTLY
+	var wg sync.WaitGroup
+	var failedCount int32
+
+	// Semaphore to limit concurrency (prevents crashing the DB with too many connections)
+	maxConcurrency := 50
+	sem := make(chan struct{}, maxConcurrency)
+
 	for _, contact := range chunk {
-		if err := w.processContact(env, templateBody, contact); err != nil {
-			log.Errorf("processContact msisdn=%s: %v", contact.MSISDN, err)
-			failed++
-		}
+		wg.Add(1)
+		sem <- struct{}{} // Acquire a concurrency token
+
+		go func(c Contact) {
+			defer wg.Done()
+			defer func() { <-sem }() // Release the token when done
+
+			if err := w.processContact(env, templateBody, c); err != nil {
+				log.Errorf("processContact msisdn=%s: %v", c.MSISDN, err)
+				atomic.AddInt32(&failedCount, 1) // Safely increment the failure counter
+			}
+		}(contact) // Pass 'contact' into the closure safely
+	}
+
+	// Wait for all 5,000 parallel goroutines to finish
+	wg.Wait()
+	failed := int(failedCount)
+
+	if failed > 0 {
+		log.Warnf("Chunk finished with %d failed fan-outs out of %d", failed, len(chunk))
 	}
 
 	// 6. Yield or Finish
 	if end >= len(contacts) {
-		// Campaign is 100% complete
+		// Campaign is 100% complete in terms of Fan-Out
 		w.rdc.Del(w.ctx, cursorKey)
+
+		// 🪄 UPDATE CAMPAIGN STATUS IN DB
+		if err := w.db.Exec(`UPDATE campaigns SET status = 'PROCESSED', updated_at = NOW() WHERE id = ?`, env.CampaignID).Error; err != nil {
+			log.Errorf("Failed to update campaign status to PROCESSED: %v", err)
+		}
+
 		_ = d.Ack(false)
 		log.Infof("campaign_id=%d fan-out COMPLETE", env.CampaignID)
 	} else {

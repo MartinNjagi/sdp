@@ -191,6 +191,9 @@ func (s *SDP) HotWallet() *wallet.HotWallet {
 func (s *SDP) Start() {
 	logrus.Info("[SDP] Starting worker pools and wallet flusher...")
 	s.worker.Start(s.ctx)
+
+	// Start the 10-minute campaign cron job
+	StartCampaignMonitor(s.ctx, s.db)
 	logrus.Info("[SDP] ✅ All components running")
 }
 

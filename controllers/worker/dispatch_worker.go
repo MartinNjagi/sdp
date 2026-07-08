@@ -93,7 +93,7 @@ func (w *DispatchWorker) start(wg *sync.WaitGroup) {
 			w.consume(id)
 		}(i)
 	}
-	logrus.Infof("[DispatchWorker/%s] Pool of %d goroutines started", w.queueName, w.poolSize)
+	//logrus.Infof("[DispatchWorker/%s] Pool of %d goroutines started", w.queueName, w.poolSize)
 }
 
 // Phase 1: Tell RabbitMQ to stop sending new messages to this worker pool
