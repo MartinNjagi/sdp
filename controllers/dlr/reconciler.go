@@ -270,14 +270,8 @@ func (r *Reconciler) flushBatch(ctx context.Context) {
 		return
 	}
 
-	// 3. Prepare the updates and trigger side-effects
-	// We use a struct to hold the data for our transaction loop
-	type updatePayload struct {
-		ID        uint64
-		Status    string
-		UpdatedAt time.Time
-	}
-	var toUpdate []updatePayload
+	// 3. Group IDs into Status Buckets
+	statusBuckets := make(map[string][]uint64)
 
 	for _, ob := range outboxes {
 		if isTerminal(ob.Status) {
@@ -287,41 +281,33 @@ func (r *Reconciler) flushBatch(ctx context.Context) {
 		rawDLR := dlrMap[ob.MessageID]
 		newStatus := normalise(rawDLR.RawStatus)
 
-		toUpdate = append(toUpdate, updatePayload{
-			ID:        ob.ID,
-			Status:    newStatus,
-			UpdatedAt: time.Now(),
-		})
+		// Drop the ID into the correct bucket (e.g., the "DELIVERED" bucket)
+		statusBuckets[newStatus] = append(statusBuckets[newStatus], ob.ID)
 
 		// Trigger Refunds, Webhooks, SSE (These are asynchronous/fast)
 		r.dispatchEffects(ctx, logrus.NewEntry(logrus.StandardLogger()), ob, newStatus)
 	}
 
-	if len(toUpdate) == 0 {
-		return
-	}
+	// 4. Execute ONE query per bucket
+	// At most, this loop will only run 3 times (for DELIVERED, FAILED, and REJECTED)
+	for status, ids := range statusBuckets {
+		if len(ids) == 0 {
+			continue
+		}
 
-	// Build exactly ONE query for the DLR updates
-	query := "UPDATE outboxes SET updated_at = ?, status = CASE id "
-	var args []interface{}
-	args = append(args, time.Now()) // <-- Pass Go's localized time here
-	var ids []uint64
+		// Executes: UPDATE outboxes SET status = 'DELIVERED', updated_at = NOW() WHERE id IN (1, 2, 3...)
+		err := r.db.WithContext(ctx).
+			Table("outboxes").
+			Where("id IN ?", ids).
+			Updates(map[string]interface{}{
+				"status":     status,
+				"updated_at": time.Now(), // Pass Go's localized time here to fix the timezone bug!
+			}).Error
 
-	for _, payload := range toUpdate {
-		query += "WHEN ? THEN ? "
-		args = append(args, payload.ID, payload.Status)
-		ids = append(ids, payload.ID)
-	}
-
-	query += "END WHERE id IN ?"
-	args = append(args, ids)
-
-	// Execute the massive update in a single network round-trip
-	err = r.db.WithContext(ctx).Exec(query, args...).Error
-
-	if err != nil {
-		logrus.Errorf("[DLR Flusher] Bulk CASE update failed: %v", err)
-	} else {
-		logrus.Infof("[DLR Flusher] Successfully bulk-updated %d message statuses in 1 query", len(toUpdate))
+		if err != nil {
+			logrus.Errorf("[DLR Flusher] Failed to bulk-update %s bucket: %v", status, err)
+		} else {
+			logrus.Infof("[DLR Flusher] Successfully bulk-updated %d messages to %s", len(ids), status)
+		}
 	}
 }

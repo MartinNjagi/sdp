@@ -102,7 +102,7 @@ func (w *BulkWorker) cancelConsumer() {
 			if err := w.ch.Cancel(tag, false); err != nil {
 				logrus.Warnf("[BulkWorker] Failed to cancel consumer %s: %v", tag, err)
 			} else {
-				logrus.Infof("[BulkWorker] Cancelled consumer: %s", tag)
+				logrus.Debugf("[BulkWorker] Cancelled consumer: %s", tag)
 			}
 		}
 	}

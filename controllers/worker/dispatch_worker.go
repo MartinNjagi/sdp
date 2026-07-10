@@ -13,6 +13,7 @@ import (
 	"sdp/controllers/ratelimiter"
 	"sdp/controllers/wallet"
 	"sdp/data"
+	"sync/atomic"
 
 	"sync"
 	"time"
@@ -46,6 +47,7 @@ type DispatchWorker struct {
 	rdc            *redis.Client
 	costEngine     *data.CostEngine
 	poolSize       int
+	tpsCounter     *uint64
 }
 
 // newDispatchWorker constructs a DispatchWorker bound to a specific queue.
@@ -55,6 +57,7 @@ func newDispatchWorker(
 	queueName string,
 	deps Deps,
 	poolSize int,
+	tpsCounter *uint64,
 ) (*DispatchWorker, error) {
 
 	// FIX: Use the manager's connection to open the channel
@@ -83,6 +86,7 @@ func newDispatchWorker(
 		db:         deps.DB,
 		rdc:        deps.RDC,
 		poolSize:   poolSize,
+		tpsCounter: tpsCounter,
 	}, nil
 }
 
@@ -111,7 +115,7 @@ func (w *DispatchWorker) cancelConsumer() {
 			if err := w.ch.Cancel(tag, false); err != nil {
 				logrus.Warnf("[DispatchWorker/%s] Failed to cancel consumer %s: %v", w.queueName, tag, err)
 			} else {
-				logrus.Infof("[DispatchWorker/%s] Cancelled consumer: %s", w.queueName, tag)
+				logrus.Debugf("[DispatchWorker/%s] Cancelled consumer: %s", w.queueName, tag)
 			}
 		}
 	}
@@ -261,6 +265,9 @@ func (w *DispatchWorker) handle(workerID int, d amqplib.Delivery) {
 		w.handleDispatchError(log, d, env, dispErr)
 		return
 	}
+
+	// 🚀 4. Increment the TPS Counter safely across all goroutines
+	atomic.AddUint64(w.tpsCounter, 1)
 
 	// 6. Mark SENT — store the provider message ID for later DLR matching.
 	if err := w.markSent(env.OutboxID, result.ProviderMsgID); err != nil {

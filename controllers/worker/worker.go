@@ -14,6 +14,7 @@ import (
 	"sdp/controllers/wallet"
 	"sdp/data"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"sync"
@@ -55,19 +56,24 @@ type Deps struct {
 // Pool sizes are independent (cfg.WorkerPoolVIP/Standard/Bulk) so VIP always
 // has more consumers than bulk, regardless of campaign queue depth.
 type Worker struct {
-	bulk     *BulkWorker
-	vip      *DispatchWorker
-	standard *DispatchWorker
-	flusher  *wallet.Flusher
-	wg       sync.WaitGroup
-	rdc      *redis.Client
-	db       *gorm.DB
+	bulk            *BulkWorker
+	vip             *DispatchWorker
+	standard        *DispatchWorker
+	flusher         *wallet.Flusher
+	wg              sync.WaitGroup
+	rdc             *redis.Client
+	db              *gorm.DB
+	outboundCounter uint64
 }
 
 // New constructs the Worker and all three sub-pools from a single Deps
 // bundle plus ctx/cfg. Called once by SDP.New.
 func New(ctx context.Context, cfg *data.AppConfig, deps Deps) (*Worker, error) {
-
+	w := &Worker{
+		flusher: deps.Flusher,
+		rdc:     deps.RDC,
+		db:      deps.DB,
+	}
 	logrus.Printf("Workers Bulk %d, VIP %d, Standard %d, Flusher %d", cfg.WorkerPoolBulk, cfg.WorkerPoolVIP, cfg.WorkerPoolStandard, cfg.WalletFlushInterval)
 
 	bulk, err := newBulkWorker(ctx, deps.RMQManager, deps.Publisher, deps.RDC, deps.Router, deps.CostEngine, deps.DB, deps.S3, cfg.WorkerPoolBulk, cfg.S3Bucket)
@@ -75,24 +81,21 @@ func New(ctx context.Context, cfg *data.AppConfig, deps Deps) (*Worker, error) {
 		return nil, err
 	}
 
-	vip, err := newDispatchWorker(ctx, deps.RMQManager, publisher.QueueVIP, deps, cfg.WorkerPoolVIP)
+	vip, err := newDispatchWorker(ctx, deps.RMQManager, publisher.QueueVIP, deps, cfg.WorkerPoolVIP, &w.outboundCounter)
 	if err != nil {
 		return nil, err
 	}
 
-	standard, err := newDispatchWorker(ctx, deps.RMQManager, publisher.QueueStandard, deps, cfg.WorkerPoolStandard)
+	standard, err := newDispatchWorker(ctx, deps.RMQManager, publisher.QueueStandard, deps, cfg.WorkerPoolStandard, &w.outboundCounter)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Worker{
-		bulk:     bulk,
-		vip:      vip,
-		standard: standard,
-		flusher:  deps.Flusher,
-		rdc:      deps.RDC,
-		db:       deps.DB,
-	}, nil
+	w.bulk = bulk
+	w.vip = vip
+	w.standard = standard
+
+	return w, nil
 }
 
 // Start launches every sub-pool's goroutines. Called after the HTTP server
@@ -110,6 +113,7 @@ func (w *Worker) Start(ctx context.Context) {
 	// Start the background SENT batcher
 	w.StartSentBatcher(ctx)
 
+	w.StartTPSMonitor(ctx)
 	logrus.Info("[Worker] All sub-pools running ✅ (bulk, vip, standard)")
 }
 
@@ -208,4 +212,29 @@ func (w *Worker) flushSentBatch(ctx context.Context) {
 	} else {
 		logrus.Infof("[Sent Batcher] Successfully bulk-updated %d messages to SENT in 1 query", len(updateMap))
 	}
+}
+
+// StartTPSMonitor calculates and logs the outbound TPS every 5 seconds
+func (w *Worker) StartTPSMonitor(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+
+	go func() {
+		logrus.Info("[Metrics] Started internal TPS monitor ✅")
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// SwapInt64 safely reads the current count and instantly resets it to 0
+				count := atomic.SwapUint64(&w.outboundCounter, 0)
+
+				if count > 0 {
+					tps := count / 5
+					logrus.Infof("📊 [Metrics] Outbound Throughput: %d TPS (%d messages in 5s)", tps, count)
+				}
+			}
+		}
+	}()
 }

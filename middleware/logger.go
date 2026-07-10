@@ -48,7 +48,7 @@ func RequestLogger() gin.HandlerFunc {
 			entry.Warn("http_request")
 
 		default:
-			entry.Info("http_request")
+			entry.Debug("http_request")
 		}
 	}
 }
